@@ -47,6 +47,8 @@ interface IMonogramMinting {
 
     event DelegatedSignerInitiated(address indexed signer, address indexed delegator);
 
+    event MaxPriceDeviationBpsChanged(uint256 oldMaxPriceDeviationBps, uint256 newMaxPriceDeviationBps);
+
     /* -------- */
     enum Role {
         Minter,
@@ -105,6 +107,8 @@ interface IMonogramMinting {
     error MaxMintPerBlockExceeded();
     error MaxRedeemPerBlockExceeded();
     error DelegationNotInitiated();
+    error StalePrice();
+    error PriceDeviationExceeded();
 
     /* --------------- FUNCTIONS --------------- */
     function hashOrder(Order calldata order) external view returns (bytes32);

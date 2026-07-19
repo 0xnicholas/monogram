@@ -10,6 +10,7 @@ import "./SingleAdminAccessControl.sol";
 import "./interfaces/IM.sol";
 import "./interfaces/IMonogramMinting.sol";
 import "./interfaces/IWETH9.sol";
+import "./interfaces/IMonogramPriceFeed.sol";
 
 contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -22,17 +23,17 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     bytes32 private constant ROUTE_TYPE = keccak256("Route(address[] addresses,uint256[] ratios)");
 
-    bytes32 private constant ORDER_TYPE = "";
+    bytes32 private constant ORDER_TYPE = keccak256(
+        "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+    );
 
-    bytes32 private constant MINTER_ROLE = "";
+    bytes32 private constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
-    bytes32 private constant REDEEMER_ROLE = "";
+    bytes32 private constant REDEEMER_ROLE = keccak256("REDEEMER_ROLE");
 
-    bytes32 private constant COLLATERAL_MANAGER_ROLE = "";
+    bytes32 private constant COLLATERAL_MANAGER_ROLE = keccak256("COLLATERAL_MANAGER_ROLE");
 
-    bytes32 private constant GATEKEEPER_ROLE = "";
-
-    bytes32 private constant EIP712_DOMAIN_TYPEHASH = "";
+    bytes32 private constant GATEKEEPER_ROLE = keccak256("GATEKEEPER_ROLE");
 
     address private constant NATIVE_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
@@ -43,6 +44,10 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     uint256 private constant ROUTE_REQUIRED_RATIO = 10_000;
 
     IWETH9 private immutable WETH;
+
+    IMonogramPriceFeed public immutable priceFeed;
+
+    uint256 public maxPriceDeviationBps = 500;
 
 
     /* --------------- STATE VARIABLES --------------- */
@@ -86,6 +91,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     constructor(
         IM _m, 
         IWETH9 _weth,
+        IMonogramPriceFeed _priceFeed,
         address[] memory _assets,
         address[] memory _custodians,
         address _admin,
@@ -94,11 +100,13 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     ) {
         if (address(_m) == address(0)) revert InvalidMAddress();
         if (address(_m) == address(0)) revert InvalidZeroAddress();
+        if (address(_priceFeed) == address(0)) revert InvalidZeroAddress();
         if (_assets.length == 0) revert NoAssetsProvided();
         if (_admin == address(0)) revert InvalidZeroAddress(); 
 
         m = _m;
         WETH = _weth;
+        priceFeed = _priceFeed;
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
@@ -145,6 +153,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         mintedPerBlock[block.number] += order.m_amount;
         _transferCollateral(
@@ -171,6 +180,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         mintedPerBlock[block.number] += order.m_amount;
         _transferEthCollateral(
@@ -197,6 +207,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         if (order.order_type != OrderType.REDEEM) revert InvalidOrder();
         verifyOrder(order, signature);
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         redeemedPerBlock[block.number] += order.m_amount;
         m.burnFrom(order.benefactor, order.m_amount);
@@ -217,6 +228,12 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     function setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setMaxRedeemPerBlock(_maxRedeemPerBlock);
+    }
+
+    function setMaxPriceDeviationBps(uint256 _maxPriceDeviationBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        uint256 oldValue = maxPriceDeviationBps;
+        maxPriceDeviationBps = _maxPriceDeviationBps;
+        emit MaxPriceDeviationBpsChanged(oldValue, maxPriceDeviationBps);
     }
 
     function disableMintRedeem() external onlyRole(GATEKEEPER_ROLE) {
@@ -295,23 +312,38 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     /* --------------- PUBLIC --------------- */
 
     function addSupportedAsset(address asset) public onlyRole(DEFAULT_ADMIN_ROLE) {
-
+        if (asset == address(0)) revert InvalidZeroAddress();
+        if (!_supportedAssets.add(asset)) revert InvalidAssetAddress();
+        emit AssetAdded(asset);
     }
 
     function addCustodianAddress(address custodian) public onlyRole(DEFAULT_ADMIN_ROLE) {
-        
+        if (custodian == address(0)) revert InvalidZeroAddress();
+        if (!_custodianAddresses.add(custodian)) revert InvalidCustodianAddress();
+        emit CustodianAddressAdded(custodian);
     }
 
     function getDomainSeparator() public view returns (bytes32) {
-
+        if (block.chainid == _chainId) return _domainSeparator;
+        return _computeDomainSeparator();
     }
 
     function hashOrder(Order calldata order) public view override returns (bytes32) {
-
+        return keccak256(abi.encodePacked("\x19\x01", getDomainSeparator(), keccak256(encodeOrder(order))));
     }
 
     function encodeOrder(Order calldata order) public pure returns (bytes memory) {
-
+        return abi.encode(
+            ORDER_TYPE,
+            order.order_type,
+            order.expiry,
+            order.nonce,
+            order.benefactor,
+            order.beneficiary,
+            order.collateral_asset,
+            order.collateral_amount,
+            order.m_amount
+        );
     }
 
     function verifyOrder(Order calldata order, Signature calldata signature)
@@ -320,23 +352,57 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         override
         returns (bytes32 taker_order_hash)
     {
-        
+        taker_order_hash = hashOrder(order);
+        if (order.expiry < block.timestamp) revert SignatureExpired();
+        address signer = ECDSA.recover(taker_order_hash, signature.signature_bytes);
+        if (signer != order.benefactor && delegatedSigner[signer][order.benefactor] != DelegatedSignerStatus.ACCEPTED) {
+            revert InvalidSignature();
+        }
     }
 
     function verifyRoute(Route calldata route) public view override returns (bool) {
+        if (route.addresses.length == 0 || route.ratios.length == 0) return false;
+        if (route.addresses.length != route.ratios.length) return false;
+        uint256 totalRatio = 0;
+        for (uint256 i = 0; i < route.ratios.length;) {
+            totalRatio += route.ratios[i];
+            if (!_custodianAddresses.contains(route.addresses[i])) return false;
+            unchecked {
+                ++i;
+            }
+        }
+        return totalRatio == ROUTE_REQUIRED_RATIO;
     }
 
     function verifyNonce(address sender, uint256 nonce) public view override returns (uint256, uint256, uint256) {
+        uint256 invalidatorSlot = nonce >> 8;
+        uint256 invalidator = _orderBitmaps[sender][invalidatorSlot];
+        uint256 invalidatorBit = 1 << (nonce & 0xFF);
+        return (invalidatorSlot, invalidator, invalidatorBit);
     }
 
     /* --------------- PRIVATE --------------- */
     /// @notice deduplication of taker order
     function _deduplicateOrder(address sender, uint256 nonce) private {
         (uint256 invalidatorSlot, uint256 invalidator, uint256 invalidatorBit) = verifyNonce(sender, nonce);
+        if (invalidator & invalidatorBit != 0) revert InvalidNonce();
         _orderBitmaps[sender][invalidatorSlot] = invalidator | invalidatorBit;
     }
 
     /* --------------- INTERNAL --------------- */
+
+    function _validatePrice(address asset, uint256 collateralAmount, uint256 mAmount) internal view {
+        (uint256 price, uint256 timestamp) = priceFeed.getPrice(asset);
+        if (block.timestamp - timestamp > 3600) revert StalePrice();
+        uint256 collateralUsd = (collateralAmount * price) / 1e18;
+        if (collateralUsd == 0 || mAmount == 0) revert InvalidAmount();
+        uint256 deviation = _absDiff(collateralUsd, mAmount) * 10_000 / mAmount;
+        if (deviation > maxPriceDeviationBps) revert PriceDeviationExceeded();
+    }
+
+    function _absDiff(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a - b : b - a;
+    }
 
     /// @notice transfer supported asset to beneficiary address
     function _transferToBeneficiary(address beneficiary, address asset, uint256 amount) internal {

@@ -12,7 +12,5 @@ interface IM is IERC20, IERC20Permit, IERC20Metadata {
 
     function burnFrom(address account, uint256 amount) external;
 
-    function grantRole(bytes32 role, address account) external;
-
     function setMinter(address newMinter) external;
 }
