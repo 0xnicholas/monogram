@@ -58,7 +58,7 @@ contract IntegrationTest is Test {
     bytes32 public constant COLLATERAL_MANAGER_ROLE = keccak256("COLLATERAL_MANAGER_ROLE");
 
     bytes32 public constant ORDER_TYPE = keccak256(
-        "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+        "Order(string order_id,uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
     bytes32 public constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -80,15 +80,23 @@ contract IntegrationTest is Test {
         address[] memory custodians = new address[](1);
         custodians[0] = custodian;
 
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](1);
+        tokenConfigs[0] = IMonogramMinting.TokenConfig({
+            isActive: true, maxMintPerBlock: 1_000_000 ether, maxRedeemPerBlock: 1_000_000 ether
+        });
+        IMonogramMinting.GlobalConfig memory globalConfig = IMonogramMinting.GlobalConfig({
+            globalMaxMintPerBlock: 1_000_000 ether, globalMaxRedeemPerBlock: 1_000_000 ether
+        });
+
         minting = new MonogramMinting(
             IM(address(m)),
             IWETH9(payable(address(0))),
             IMonogramPriceFeed(address(mockPriceFeed)),
             assets,
+            tokenConfigs,
+            globalConfig,
             custodians,
-            admin,
-            1_000_000 ether,
-            1_000_000 ether
+            admin
         );
 
         m.setMinter(address(minting));
@@ -121,6 +129,7 @@ contract IntegrationTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 ORDER_TYPE,
+                keccak256(bytes(order.order_id)),
                 order.order_type,
                 order.expiry,
                 order.nonce,
@@ -153,9 +162,10 @@ contract IntegrationTest is Test {
     function test_FullFlow_MintStakeRewardsUnstake() public {
         // 1. Mint M
         IMonogramMinting.Order memory mintOrder = IMonogramMinting.Order({
+            order_id: "itx-mint-1",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: staker,
             beneficiary: staker,
             collateral_asset: address(collateral),
@@ -275,9 +285,10 @@ contract IntegrationTest is Test {
     function test_CompleteRedeemFlow_MintStakeRedeem() public {
         // Mint
         IMonogramMinting.Order memory mintOrder = IMonogramMinting.Order({
+            order_id: "itx-mint-2",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: staker,
             beneficiary: staker,
             collateral_asset: address(collateral),
@@ -293,9 +304,10 @@ contract IntegrationTest is Test {
 
         // Redeem M back to collateral
         IMonogramMinting.Order memory redeemOrder = IMonogramMinting.Order({
+            order_id: "itx-redeem-1",
             order_type: IMonogramMinting.OrderType.REDEEM,
             expiry: block.timestamp + 1 hours,
-            nonce: 1,
+            nonce: 2,
             benefactor: staker,
             beneficiary: staker,
             collateral_asset: address(collateral),

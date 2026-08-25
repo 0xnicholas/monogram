@@ -63,15 +63,25 @@ contract DeployM is Script {
             console.log("WARNING: No custodians provided. Set CUSTODIANS env var as comma-separated addresses.");
         }
 
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](cfg.assets.length);
+        for (uint256 i = 0; i < cfg.assets.length; i++) {
+            tokenConfigs[i] = IMonogramMinting.TokenConfig({
+                isActive: true, maxMintPerBlock: cfg.maxMintPerBlock, maxRedeemPerBlock: cfg.maxRedeemPerBlock
+            });
+        }
+        IMonogramMinting.GlobalConfig memory globalConfig = IMonogramMinting.GlobalConfig({
+            globalMaxMintPerBlock: cfg.maxMintPerBlock, globalMaxRedeemPerBlock: cfg.maxRedeemPerBlock
+        });
+
         MonogramMinting minting = new MonogramMinting(
             IM(address(m)),
             weth,
             IMonogramPriceFeed(address(priceFeed)),
             cfg.assets,
+            tokenConfigs,
+            globalConfig,
             cfg.custodians,
-            cfg.admin,
-            cfg.maxMintPerBlock,
-            cfg.maxRedeemPerBlock
+            cfg.admin
         );
         console.log("MonogramMinting deployed at:", address(minting));
 

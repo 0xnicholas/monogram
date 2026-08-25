@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+import "@openzeppelin/contracts/interfaces/IERC1271.sol";
 
 import "./SingleAdminAccessControl.sol";
 import "./interfaces/IM.sol";
@@ -25,7 +26,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     bytes32 private constant ROUTE_TYPE = keccak256("Route(address[] addresses,uint256[] ratios)");
 
     bytes32 private constant ORDER_TYPE = keccak256(
-        "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+        "Order(string order_id,uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
 
     bytes32 private constant MINTER_ROLE = keccak256("MINTER_ROLE");
@@ -35,6 +36,8 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     bytes32 private constant COLLATERAL_MANAGER_ROLE = keccak256("COLLATERAL_MANAGER_ROLE");
 
     bytes32 private constant GATEKEEPER_ROLE = keccak256("GATEKEEPER_ROLE");
+
+    bytes4 private constant EIP1271_MAGICVALUE = bytes4(keccak256("isValidSignature(bytes32,bytes)"));
 
     address private constant NATIVE_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
@@ -54,7 +57,14 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     IM public immutable m;
 
-    EnumerableSet.AddressSet internal _supportedAssets;
+    /// @notice whitelisted benefactors（仅当 whitelistEnabled 时强制检查）
+    EnumerableSet.AddressSet private _whitelistedBenefactors;
+
+    /// @notice approved beneficiaries for a given benefactor（仅当 whitelistEnabled 时强制检查）
+    mapping(address => EnumerableSet.AddressSet) private _approvedBeneficiariesPerBenefactor;
+
+    /// @notice Monogram 偏离 V2 点：白名单开关，默认关闭（V2 为强制检查），见 GitHub issue #5 决议
+    bool public whitelistEnabled;
 
     EnumerableSet.AddressSet internal _custodianAddresses;
 
@@ -64,26 +74,54 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     mapping(address => mapping(uint256 => uint256)) private _orderBitmaps;
 
-    mapping(uint256 => uint256) public mintedPerBlock;
-    mapping(uint256 => uint256) public redeemedPerBlock;
-
     mapping(address => mapping(address => DelegatedSignerStatus)) public delegatedSigner;
 
-    uint256 public maxMintPerBlock;
-    uint256 public maxRedeemPerBlock;
+    /// @notice global single block totals
+    GlobalConfig public globalConfig;
+
+    /// @notice running total M minted/redeemed per single block
+    mapping(uint256 => BlockTotals) public totalPerBlock;
+
+    /// @notice running total M minted/redeemed per single block per asset
+    mapping(uint256 => mapping(address => BlockTotals)) public totalPerBlockPerAsset;
+
+    /// @notice configurations per token asset
+    mapping(address => TokenConfig) public tokenConfig;
 
     /* --------------- MODIFIERS --------------- */
-    /// @notice ensure that the already minted USDe in the actual block plus the amount to be minted is below the maxMintPerBlock var
-    /// @param mintAmount The USDe amount to be minted
-    modifier belowMaxMintPerBlock(uint256 mintAmount) {
-        if (mintedPerBlock[block.number] + mintAmount > maxMintPerBlock) revert MaxMintPerBlockExceeded();
+    /// @notice ensure that the already minted M for the given asset in the actual block plus the amount to be minted is below the asset's maxMintPerBlock
+    modifier belowMaxMintPerBlock(uint256 mintAmount, address asset) {
+        TokenConfig memory _config = tokenConfig[asset];
+        if (!_config.isActive) revert UnsupportedAsset();
+        if (totalPerBlockPerAsset[block.number][asset].mintedPerBlock + mintAmount > _config.maxMintPerBlock) {
+            revert MaxMintPerBlockExceeded();
+        }
         _;
     }
 
-    /// @notice ensure that the already redeemed USDe in the actual block plus the amount to be redeemed is below the maxRedeemPerBlock var
-    /// @param redeemAmount The USDe amount to be redeemed
-    modifier belowMaxRedeemPerBlock(uint256 redeemAmount) {
-        if (redeemedPerBlock[block.number] + redeemAmount > maxRedeemPerBlock) revert MaxRedeemPerBlockExceeded();
+    /// @notice ensure that the already redeemed M for the given asset in the actual block plus the amount to be redeemed is below the asset's maxRedeemPerBlock
+    modifier belowMaxRedeemPerBlock(uint256 redeemAmount, address asset) {
+        TokenConfig memory _config = tokenConfig[asset];
+        if (!_config.isActive) revert UnsupportedAsset();
+        if (totalPerBlockPerAsset[block.number][asset].redeemedPerBlock + redeemAmount > _config.maxRedeemPerBlock) {
+            revert MaxRedeemPerBlockExceeded();
+        }
+        _;
+    }
+
+    /// @notice ensure that the globally minted M in the actual block plus the amount to be minted is below globalMaxMintPerBlock
+    modifier belowGlobalMaxMintPerBlock(uint256 mintAmount) {
+        if (totalPerBlock[block.number].mintedPerBlock + mintAmount > globalConfig.globalMaxMintPerBlock) {
+            revert GlobalMaxMintPerBlockExceeded();
+        }
+        _;
+    }
+
+    /// @notice ensure that the globally redeemed M in the actual block plus the amount to be redeemed is below globalMaxRedeemPerBlock
+    modifier belowGlobalMaxRedeemPerBlock(uint256 redeemAmount) {
+        if (totalPerBlock[block.number].redeemedPerBlock + redeemAmount > globalConfig.globalMaxRedeemPerBlock) {
+            revert GlobalMaxRedeemPerBlockExceeded();
+        }
         _;
     }
 
@@ -93,14 +131,15 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         IWETH9 _weth,
         IMonogramPriceFeed _priceFeed,
         address[] memory _assets,
+        TokenConfig[] memory _tokenConfig,
+        GlobalConfig memory _globalConfig,
         address[] memory _custodians,
-        address _admin,
-        uint256 _maxMintPerBlock,
-        uint256 _maxRedeemPerBlock
+        address _admin
     ) {
         if (address(_m) == address(0)) revert InvalidMAddress();
         if (address(_priceFeed) == address(0)) revert InvalidZeroAddress();
         if (_assets.length == 0) revert NoAssetsProvided();
+        if (_assets.length != _tokenConfig.length) revert InvalidAssetAddress();
         if (_admin == address(0)) revert InvalidZeroAddress();
 
         m = _m;
@@ -109,13 +148,6 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
-        for (uint256 i = 0; i < _assets.length;) {
-            addSupportedAsset(_assets[i]);
-            unchecked {
-                ++i;
-            }
-        }
-
         for (uint256 j = 0; j < _custodians.length;) {
             addCustodianAddress(_custodians[j]);
             unchecked {
@@ -123,8 +155,17 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
             }
         }
 
-        _setMaxMintPerBlock(_maxMintPerBlock);
-        _setMaxRedeemPerBlock(_maxRedeemPerBlock);
+        globalConfig = _globalConfig;
+
+        for (uint256 k = 0; k < _assets.length;) {
+            if (tokenConfig[_assets[k]].isActive || _assets[k] == address(0) || _assets[k] == address(_m)) {
+                revert InvalidAssetAddress();
+            }
+            _setTokenConfig(_assets[k], _tokenConfig[k]);
+            unchecked {
+                ++k;
+            }
+        }
 
         if (msg.sender != _admin) {
             _grantRole(DEFAULT_ADMIN_ROLE, _admin);
@@ -146,23 +187,28 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         override
         nonReentrant
         onlyRole(MINTER_ROLE)
-        belowMaxMintPerBlock(order.m_amount)
+        belowMaxMintPerBlock(order.m_amount, order.collateral_asset)
+        belowGlobalMaxMintPerBlock(order.m_amount)
     {
-        if (order.order_type != OrderType.MINT) revert InvalidOrder();
+        if (order.order_type != OrderType.MINT) {
+            revert InvalidOrder();
+        }
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
         _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
-        mintedPerBlock[block.number] += order.m_amount;
+        totalPerBlockPerAsset[block.number][order.collateral_asset].mintedPerBlock += order.m_amount;
+        totalPerBlock[block.number].mintedPerBlock += order.m_amount;
         _transferCollateral(
             order.collateral_amount, order.collateral_asset, order.benefactor, route.addresses, route.ratios
         );
         m.mint(order.beneficiary, order.m_amount);
         emit Mint(
-            msg.sender,
+            order.order_id,
             order.benefactor,
             order.beneficiary,
+            msg.sender,
             order.collateral_asset,
             order.collateral_amount,
             order.m_amount
@@ -173,23 +219,28 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         external
         nonReentrant
         onlyRole(MINTER_ROLE)
-        belowMaxMintPerBlock(order.m_amount)
+        belowMaxMintPerBlock(order.m_amount, order.collateral_asset)
+        belowGlobalMaxMintPerBlock(order.m_amount)
     {
-        if (order.order_type != OrderType.MINT) revert InvalidOrder();
+        if (order.order_type != OrderType.MINT) {
+            revert InvalidOrder();
+        }
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
         _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
-        mintedPerBlock[block.number] += order.m_amount;
+        totalPerBlockPerAsset[block.number][order.collateral_asset].mintedPerBlock += order.m_amount;
+        totalPerBlock[block.number].mintedPerBlock += order.m_amount;
         _transferEthCollateral(
             order.collateral_amount, order.collateral_asset, order.benefactor, route.addresses, route.ratios
         );
         m.mint(order.beneficiary, order.m_amount);
         emit Mint(
-            msg.sender,
+            order.order_id,
             order.benefactor,
             order.beneficiary,
+            msg.sender,
             order.collateral_asset,
             order.collateral_amount,
             order.m_amount
@@ -201,32 +252,47 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         override
         nonReentrant
         onlyRole(REDEEMER_ROLE)
-        belowMaxRedeemPerBlock(order.m_amount)
+        belowMaxRedeemPerBlock(order.m_amount, order.collateral_asset)
+        belowGlobalMaxRedeemPerBlock(order.m_amount)
     {
-        if (order.order_type != OrderType.REDEEM) revert InvalidOrder();
+        if (order.order_type != OrderType.REDEEM) {
+            revert InvalidOrder();
+        }
         verifyOrder(order, signature);
         _deduplicateOrder(order.benefactor, order.nonce);
         _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
-        redeemedPerBlock[block.number] += order.m_amount;
+        totalPerBlockPerAsset[block.number][order.collateral_asset].redeemedPerBlock += order.m_amount;
+        totalPerBlock[block.number].redeemedPerBlock += order.m_amount;
         m.burnFrom(order.benefactor, order.m_amount);
         _transferToBeneficiary(order.beneficiary, order.collateral_asset, order.collateral_amount);
         emit Redeem(
-            msg.sender,
+            order.order_id,
             order.benefactor,
             order.beneficiary,
+            msg.sender,
             order.collateral_asset,
             order.collateral_amount,
             order.m_amount
         );
     }
 
-    function setMaxMintPerBlock(uint256 _maxMintPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setMaxMintPerBlock(_maxMintPerBlock);
+    /// @notice Sets the overall, global maximum M mint size per block
+    function setGlobalMaxMintPerBlock(uint256 _globalMaxMintPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        globalConfig.globalMaxMintPerBlock = _globalMaxMintPerBlock;
     }
 
-    function setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        _setMaxRedeemPerBlock(_maxRedeemPerBlock);
+    /// @notice Sets the overall, global maximum M redeem size per block
+    function setGlobalMaxRedeemPerBlock(uint256 _globalMaxRedeemPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        globalConfig.globalMaxRedeemPerBlock = _globalMaxRedeemPerBlock;
+    }
+
+    function setMaxMintPerBlock(uint256 _maxMintPerBlock, address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setMaxMintPerBlock(_maxMintPerBlock, asset);
+    }
+
+    function setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock, address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _setMaxRedeemPerBlock(_maxRedeemPerBlock, asset);
     }
 
     function setMaxPriceDeviationBps(uint256 _maxPriceDeviationBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
@@ -236,8 +302,8 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     }
 
     function disableMintRedeem() external onlyRole(GATEKEEPER_ROLE) {
-        _setMaxMintPerBlock(0);
-        _setMaxRedeemPerBlock(0);
+        globalConfig.globalMaxMintPerBlock = 0;
+        globalConfig.globalMaxRedeemPerBlock = 0;
     }
 
     function setDelegatedSigner(address _delegateTo) external {
@@ -275,13 +341,23 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     /// @notice Removes an asset from the supported assets list
     function removeSupportedAsset(address asset) external onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (!_supportedAssets.remove(asset)) revert InvalidAssetAddress();
+        if (!tokenConfig[asset].isActive) revert InvalidAssetAddress();
+        delete tokenConfig[asset];
         emit AssetRemoved(asset);
     }
 
     /// @notice Checks if an asset is supported.
     function isSupportedAsset(address asset) external view returns (bool) {
-        return _supportedAssets.contains(asset);
+        return tokenConfig[asset].isActive;
+    }
+
+    /// @notice Adds an asset with its per-asset config
+    function addSupportedAsset(address asset, TokenConfig memory _tokenConfig) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (tokenConfig[asset].isActive || asset == address(0) || asset == address(m)) {
+            revert InvalidAssetAddress();
+        }
+        _setTokenConfig(asset, _tokenConfig);
+        emit AssetAdded(asset);
     }
 
     /// @notice Removes an custodian from the custodian address list
@@ -308,18 +384,49 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         _revokeRole(COLLATERAL_MANAGER_ROLE, collateralManager);
     }
 
-    /* --------------- PUBLIC --------------- */
-
-    function addSupportedAsset(address asset) public onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (asset == address(0)) revert InvalidZeroAddress();
-        if (!_supportedAssets.add(asset)) revert InvalidAssetAddress();
-        emit AssetAdded(asset);
+    /// @notice Removes the benefactor address from the benefactor whitelist
+    function removeWhitelistedBenefactor(address benefactor) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!_whitelistedBenefactors.remove(benefactor)) revert InvalidAddress();
+        emit BenefactorRemoved(benefactor);
     }
 
+    /// @notice Enables or disables the benefactor/beneficiary whitelist checks in verifyOrder
+    function setWhitelistEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        whitelistEnabled = _enabled;
+        emit WhitelistEnabledSet(_enabled);
+    }
+
+    /* --------------- PUBLIC --------------- */
+
     function addCustodianAddress(address custodian) public onlyRole(DEFAULT_ADMIN_ROLE) {
-        if (custodian == address(0)) revert InvalidZeroAddress();
+        if (custodian == address(0) || custodian == address(m)) revert InvalidCustodianAddress();
         if (!_custodianAddresses.add(custodian)) revert InvalidCustodianAddress();
         emit CustodianAddressAdded(custodian);
+    }
+
+    /// @notice Adds a benefactor address to the benefactor whitelist
+    function addWhitelistedBenefactor(address benefactor) public onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (benefactor == address(0) || !_whitelistedBenefactors.add(benefactor)) {
+            revert InvalidBenefactorAddress();
+        }
+        emit BenefactorAdded(benefactor);
+    }
+
+    /// @notice Adds or removes a beneficiary address from the caller's approved beneficiaries list
+    /// @param beneficiary The beneficiary address
+    /// @param status true to approve, false to remove
+    function setApprovedBeneficiary(address beneficiary, bool status) public {
+        if (status) {
+            if (!_approvedBeneficiariesPerBenefactor[msg.sender].add(beneficiary)) {
+                revert InvalidBeneficiaryAddress();
+            }
+            emit BeneficiaryAdded(msg.sender, beneficiary);
+        } else {
+            if (!_approvedBeneficiariesPerBenefactor[msg.sender].remove(beneficiary)) {
+                revert InvalidBeneficiaryAddress();
+            }
+            emit BeneficiaryRemoved(msg.sender, beneficiary);
+        }
     }
 
     function getDomainSeparator() public view returns (bytes32) {
@@ -334,6 +441,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     function encodeOrder(Order calldata order) public pure returns (bytes memory) {
         return abi.encode(
             ORDER_TYPE,
+            keccak256(bytes(order.order_id)),
             order.order_type,
             order.expiry,
             order.nonce,
@@ -352,11 +460,39 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         returns (bytes32 taker_order_hash)
     {
         taker_order_hash = hashOrder(order);
-        if (order.expiry < block.timestamp) revert SignatureExpired();
-        address signer = ECDSA.recover(taker_order_hash, signature.signature_bytes);
-        if (signer != order.benefactor && delegatedSigner[signer][order.benefactor] != DelegatedSignerStatus.ACCEPTED) {
-            revert InvalidSignature();
+        if (signature.signature_type == SignatureType.EIP712) {
+            address signer = ECDSA.recover(taker_order_hash, signature.signature_bytes);
+            if (
+                signer != order.benefactor
+                    && delegatedSigner[signer][order.benefactor] != DelegatedSignerStatus.ACCEPTED
+            ) {
+                revert InvalidEIP712Signature();
+            }
+        } else if (signature.signature_type == SignatureType.EIP1271) {
+            if (
+                IERC1271(order.benefactor).isValidSignature(taker_order_hash, signature.signature_bytes)
+                    != EIP1271_MAGICVALUE
+            ) {
+                revert InvalidEIP1271Signature();
+            }
+        } else {
+            revert UnknownSignatureType();
         }
+        // Monogram 偏离 V2 点：白名单检查由开关控制，默认关闭（V2 为强制检查）
+        if (whitelistEnabled) {
+            if (!_whitelistedBenefactors.contains(order.benefactor)) {
+                revert BenefactorNotWhitelisted();
+            }
+            if (
+                order.benefactor != order.beneficiary
+                    && !_approvedBeneficiariesPerBenefactor[order.benefactor].contains(order.beneficiary)
+            ) {
+                revert BeneficiaryNotApproved();
+            }
+        }
+        if (order.beneficiary == address(0)) revert InvalidAddress();
+        if (order.collateral_amount == 0 || order.m_amount == 0) revert InvalidAmount();
+        if (block.timestamp > order.expiry) revert SignatureExpired();
     }
 
     function verifyRoute(Route calldata route) public view override returns (bool) {
@@ -364,8 +500,8 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         if (route.addresses.length != route.ratios.length) return false;
         uint256 totalRatio = 0;
         for (uint256 i = 0; i < route.ratios.length;) {
+            if (!_custodianAddresses.contains(route.addresses[i]) || route.ratios[i] == 0) return false;
             totalRatio += route.ratios[i];
-            if (!_custodianAddresses.contains(route.addresses[i])) return false;
             unchecked {
                 ++i;
             }
@@ -374,9 +510,11 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     }
 
     function verifyNonce(address sender, uint256 nonce) public view override returns (uint256, uint256, uint256) {
+        if (nonce == 0) revert InvalidNonce();
         uint256 invalidatorSlot = nonce >> 8;
         uint256 invalidator = _orderBitmaps[sender][invalidatorSlot];
         uint256 invalidatorBit = 1 << (nonce & 0xFF);
+        if (invalidator & invalidatorBit != 0) revert InvalidNonce();
         return (invalidatorSlot, invalidator, invalidatorBit);
     }
 
@@ -384,7 +522,6 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     /// @notice deduplication of taker order
     function _deduplicateOrder(address sender, uint256 nonce) private {
         (uint256 invalidatorSlot, uint256 invalidator, uint256 invalidatorBit) = verifyNonce(sender, nonce);
-        if (invalidator & invalidatorBit != 0) revert InvalidNonce();
         _orderBitmaps[sender][invalidatorSlot] = invalidator | invalidatorBit;
     }
 
@@ -418,7 +555,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
             (bool success,) = (beneficiary).call{value: amount}("");
             if (!success) revert TransferFailed();
         } else {
-            if (!_supportedAssets.contains(asset)) revert UnsupportedAsset();
+            if (!tokenConfig[asset].isActive) revert UnsupportedAsset();
             IERC20(asset).safeTransfer(beneficiary, amount);
         }
     }
@@ -432,7 +569,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         uint256[] calldata ratios
     ) internal {
         // cannot mint using unsupported asset or native ETH even if it is supported for redemptions
-        if (!_supportedAssets.contains(asset) || asset == NATIVE_TOKEN) revert UnsupportedAsset();
+        if (!tokenConfig[asset].isActive || asset == NATIVE_TOKEN) revert UnsupportedAsset();
         IERC20 token = IERC20(asset);
         uint256 totalTransferred = 0;
         for (uint256 i = 0; i < addresses.length;) {
@@ -457,7 +594,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         address[] calldata addresses,
         uint256[] calldata ratios
     ) internal {
-        if (!_supportedAssets.contains(asset) || asset == NATIVE_TOKEN || asset != address(WETH)) {
+        if (!tokenConfig[asset].isActive || asset == NATIVE_TOKEN || asset != address(WETH)) {
             revert UnsupportedAsset();
         }
         IERC20 token = IERC20(asset);
@@ -482,23 +619,49 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         }
     }
 
-    /// @notice Sets the max mintPerBlock limit
-    function _setMaxMintPerBlock(uint256 _maxMintPerBlock) internal {
-        uint256 oldMaxMintPerBlock = maxMintPerBlock;
-        maxMintPerBlock = _maxMintPerBlock;
-        emit MaxMintPerBlockChanged(oldMaxMintPerBlock, maxMintPerBlock);
+    /// @notice Sets the per-asset config; maxMintPerBlock/maxRedeemPerBlock must be non-zero
+    function _setTokenConfig(address asset, TokenConfig memory _tokenConfig) internal {
+        if (_tokenConfig.maxMintPerBlock == 0 || _tokenConfig.maxRedeemPerBlock == 0) {
+            revert InvalidAmount();
+        }
+        _tokenConfig.isActive = true;
+        tokenConfig[asset] = _tokenConfig;
     }
 
-    /// @notice Sets the max redeemPerBlock limit
-    function _setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock) internal {
-        uint256 oldMaxRedeemPerBlock = maxRedeemPerBlock;
-        maxRedeemPerBlock = _maxRedeemPerBlock;
-        emit MaxRedeemPerBlockChanged(oldMaxRedeemPerBlock, maxRedeemPerBlock);
+    /// @notice Sets the max mintPerBlock limit for a given asset
+    function _setMaxMintPerBlock(uint256 _maxMintPerBlock, address asset) internal {
+        uint256 oldMaxMintPerBlock = tokenConfig[asset].maxMintPerBlock;
+        tokenConfig[asset].maxMintPerBlock = _maxMintPerBlock;
+        emit MaxMintPerBlockChanged(oldMaxMintPerBlock, _maxMintPerBlock, asset);
+    }
+
+    /// @notice Sets the max redeemPerBlock limit for a given asset
+    function _setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock, address asset) internal {
+        uint256 oldMaxRedeemPerBlock = tokenConfig[asset].maxRedeemPerBlock;
+        tokenConfig[asset].maxRedeemPerBlock = _maxRedeemPerBlock;
+        emit MaxRedeemPerBlockChanged(oldMaxRedeemPerBlock, _maxRedeemPerBlock, asset);
     }
 
     /// @notice Compute the current domain separator
     /// @return The domain separator for the token
     function _computeDomainSeparator() internal view returns (bytes32) {
         return keccak256(abi.encode(EIP712_DOMAIN, EIP_712_NAME, EIP712_REVISION, block.chainid, address(this)));
+    }
+
+    /* --------------- GETTERS --------------- */
+
+    /// @notice returns whether an address is a custodian
+    function isCustodianAddress(address custodian) public view returns (bool) {
+        return _custodianAddresses.contains(custodian);
+    }
+
+    /// @notice returns whether an address is a whitelisted benefactor
+    function isWhitelistedBenefactor(address benefactor) public view returns (bool) {
+        return _whitelistedBenefactors.contains(benefactor);
+    }
+
+    /// @notice returns whether an address is an approved beneficiary for a given benefactor
+    function isApprovedBeneficiary(address benefactor, address beneficiary) public view returns (bool) {
+        return _approvedBeneficiariesPerBenefactor[benefactor].contains(beneficiary);
     }
 }

@@ -7,6 +7,7 @@ import "../src/MonogramMinting.sol";
 import "../src/WETH9.sol";
 import "../src/interfaces/IMonogramPriceFeed.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract MockERC20 is ERC20 {
     constructor(string memory name, string memory symbol) ERC20(name, symbol) {}
@@ -53,6 +54,27 @@ contract MockPriceFeed is IMonogramPriceFeed {
     function removeOracleConfig(address) external {}
 }
 
+/// @notice 模拟合约钱包：持有 ECDSA signer，签名可恢复出 signer 时返回 EIP-1271 magic value
+contract MockEIP1271Wallet {
+    bytes4 internal constant EIP1271_MAGICVALUE = 0x1626ba7e;
+    bytes4 internal constant EIP1271_INVALID_VALUE = 0xffffffff;
+
+    address public signer;
+
+    constructor(address _signer) {
+        signer = _signer;
+    }
+
+    function isValidSignature(bytes32 hash, bytes memory signature) external view returns (bytes4) {
+        address recovered = ECDSA.recover(hash, signature);
+        return recovered == signer ? EIP1271_MAGICVALUE : EIP1271_INVALID_VALUE;
+    }
+
+    function approveToken(IERC20 token, address spender, uint256 amount) external {
+        token.approve(spender, amount);
+    }
+}
+
 contract MonogramMintingTest is Test {
     M public m;
     WETH9 public weth;
@@ -74,6 +96,7 @@ contract MonogramMintingTest is Test {
 
     uint256 public benefactorPrivateKey = 0xA11CE;
     uint256 public delegatePrivateKey = 0xB0B;
+    uint256 public walletSignerPrivateKey = 0xC0FFEE;
 
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     bytes32 public constant REDEEMER_ROLE = keccak256("REDEEMER_ROLE");
@@ -85,22 +108,28 @@ contract MonogramMintingTest is Test {
     uint256 public constant ROUTE_REQUIRED_RATIO = 10_000;
 
     event Mint(
-        address indexed minter,
+        string indexed order_id,
         address indexed benefactor,
         address indexed beneficiary,
+        address minter,
         address collateral_asset,
         uint256 collateral_amount,
         uint256 m_amount
     );
 
     event Redeem(
-        address indexed redeemer,
+        string indexed order_id,
         address indexed benefactor,
         address indexed beneficiary,
+        address redeemer,
         address collateral_asset,
         uint256 collateral_amount,
         uint256 m_amount
     );
+
+    event MaxMintPerBlockChanged(uint256 oldMaxMintPerBlock, uint256 newMaxMintPerBlock, address indexed asset);
+
+    event MaxRedeemPerBlockChanged(uint256 oldMaxRedeemPerBlock, uint256 newMaxRedeemPerBlock, address indexed asset);
 
     function setUp() public {
         benefactor = vm.addr(benefactorPrivateKey);
@@ -116,6 +145,11 @@ contract MonogramMintingTest is Test {
         address[] memory assets = new address[](1);
         assets[0] = address(collateral);
 
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](1);
+        tokenConfigs[0] = _defaultTokenConfig();
+
+        IMonogramMinting.GlobalConfig memory globalConfig = _defaultGlobalConfig();
+
         address[] memory custodians = new address[](2);
         custodians[0] = custodian1;
         custodians[1] = custodian2;
@@ -125,10 +159,10 @@ contract MonogramMintingTest is Test {
             IWETH9(payable(address(weth))),
             IMonogramPriceFeed(address(mockPriceFeed)),
             assets,
+            tokenConfigs,
+            globalConfig,
             custodians,
-            admin,
-            MAX_MINT_PER_BLOCK,
-            MAX_REDEEM_PER_BLOCK
+            admin
         );
 
         m.setMinter(address(minting));
@@ -146,6 +180,18 @@ contract MonogramMintingTest is Test {
         collateral.approve(address(minting), type(uint256).max);
     }
 
+    function _defaultTokenConfig() internal pure returns (IMonogramMinting.TokenConfig memory) {
+        return IMonogramMinting.TokenConfig({
+            isActive: true, maxMintPerBlock: MAX_MINT_PER_BLOCK, maxRedeemPerBlock: MAX_REDEEM_PER_BLOCK
+        });
+    }
+
+    function _defaultGlobalConfig() internal pure returns (IMonogramMinting.GlobalConfig memory) {
+        return IMonogramMinting.GlobalConfig({
+            globalMaxMintPerBlock: MAX_MINT_PER_BLOCK, globalMaxRedeemPerBlock: MAX_REDEEM_PER_BLOCK
+        });
+    }
+
     function _computeDomainSeparator() internal view returns (bytes32) {
         bytes32 DOMAIN_TYPEHASH =
             keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -156,11 +202,12 @@ contract MonogramMintingTest is Test {
 
     function _hashOrder(IMonogramMinting.Order memory order) internal view returns (bytes32) {
         bytes32 ORDER_TYPE = keccak256(
-            "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+            "Order(string order_id,uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
         );
         bytes32 structHash = keccak256(
             abi.encode(
                 ORDER_TYPE,
+                keccak256(bytes(order.order_id)),
                 order.order_type,
                 order.expiry,
                 order.nonce,
@@ -195,6 +242,7 @@ contract MonogramMintingTest is Test {
         returns (IMonogramMinting.Order memory)
     {
         return IMonogramMinting.Order({
+            order_id: "order-1",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
             nonce: nonce,
@@ -222,6 +270,7 @@ contract MonogramMintingTest is Test {
         returns (IMonogramMinting.Order memory)
     {
         return IMonogramMinting.Order({
+            order_id: "order-1",
             order_type: IMonogramMinting.OrderType.REDEEM,
             expiry: block.timestamp + 1 hours,
             nonce: nonce,
@@ -238,8 +287,13 @@ contract MonogramMintingTest is Test {
     function test_Deployment() public view {
         assertEq(address(minting.m()), address(m));
         assertTrue(minting.isSupportedAsset(address(collateral)));
-        assertEq(minting.maxMintPerBlock(), MAX_MINT_PER_BLOCK);
-        assertEq(minting.maxRedeemPerBlock(), MAX_REDEEM_PER_BLOCK);
+        (bool isActive, uint256 maxMintPerBlock, uint256 maxRedeemPerBlock) = minting.tokenConfig(address(collateral));
+        assertTrue(isActive);
+        assertEq(maxMintPerBlock, MAX_MINT_PER_BLOCK);
+        assertEq(maxRedeemPerBlock, MAX_REDEEM_PER_BLOCK);
+        (uint256 globalMaxMintPerBlock, uint256 globalMaxRedeemPerBlock) = minting.globalConfig();
+        assertEq(globalMaxMintPerBlock, MAX_MINT_PER_BLOCK);
+        assertEq(globalMaxRedeemPerBlock, MAX_REDEEM_PER_BLOCK);
         assertTrue(minting.hasRole(MINTER_ROLE, minter));
         assertTrue(minting.hasRole(REDEEMER_ROLE, redeemer));
         assertTrue(minting.hasRole(GATEKEEPER_ROLE, gatekeeper));
@@ -248,6 +302,8 @@ contract MonogramMintingTest is Test {
     function test_Deployment_ZeroMAddress() public {
         address[] memory assets = new address[](1);
         assets[0] = address(collateral);
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](1);
+        tokenConfigs[0] = _defaultTokenConfig();
         address[] memory custodians = new address[](0);
 
         vm.expectRevert(IMonogramMinting.InvalidMAddress.selector);
@@ -256,15 +312,16 @@ contract MonogramMintingTest is Test {
             IWETH9(payable(address(weth))),
             IMonogramPriceFeed(address(mockPriceFeed)),
             assets,
+            tokenConfigs,
+            _defaultGlobalConfig(),
             custodians,
-            admin,
-            1000,
-            1000
+            admin
         );
     }
 
     function test_Deployment_NoAssets() public {
         address[] memory assets = new address[](0);
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](0);
         address[] memory custodians = new address[](0);
 
         vm.expectRevert(IMonogramMinting.NoAssetsProvided.selector);
@@ -273,10 +330,50 @@ contract MonogramMintingTest is Test {
             IWETH9(payable(address(weth))),
             IMonogramPriceFeed(address(mockPriceFeed)),
             assets,
+            tokenConfigs,
+            _defaultGlobalConfig(),
             custodians,
-            admin,
-            1000,
-            1000
+            admin
+        );
+    }
+
+    function test_Deployment_MismatchedConfigLengths() public {
+        address[] memory assets = new address[](1);
+        assets[0] = address(collateral);
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](0);
+        address[] memory custodians = new address[](0);
+
+        vm.expectRevert(IMonogramMinting.InvalidAssetAddress.selector);
+        new MonogramMinting(
+            IM(address(m)),
+            IWETH9(payable(address(weth))),
+            IMonogramPriceFeed(address(mockPriceFeed)),
+            assets,
+            tokenConfigs,
+            _defaultGlobalConfig(),
+            custodians,
+            admin
+        );
+    }
+
+    function test_Deployment_ZeroTokenConfigLimit() public {
+        address[] memory assets = new address[](1);
+        assets[0] = address(collateral);
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](1);
+        tokenConfigs[0] =
+            IMonogramMinting.TokenConfig({isActive: true, maxMintPerBlock: 0, maxRedeemPerBlock: MAX_REDEEM_PER_BLOCK});
+        address[] memory custodians = new address[](0);
+
+        vm.expectRevert(IMonogramMinting.InvalidAmount.selector);
+        new MonogramMinting(
+            IM(address(m)),
+            IWETH9(payable(address(weth))),
+            IMonogramPriceFeed(address(mockPriceFeed)),
+            assets,
+            tokenConfigs,
+            _defaultGlobalConfig(),
+            custodians,
+            admin
         );
     }
 
@@ -306,20 +403,20 @@ contract MonogramMintingTest is Test {
     function test_AddSupportedAsset() public {
         address newAsset = makeAddr("newAsset");
         vm.prank(admin);
-        minting.addSupportedAsset(newAsset);
+        minting.addSupportedAsset(newAsset, _defaultTokenConfig());
         assertTrue(minting.isSupportedAsset(newAsset));
     }
 
     function test_AddSupportedAsset_ZeroAddress() public {
         vm.prank(admin);
-        vm.expectRevert(IMonogramMinting.InvalidZeroAddress.selector);
-        minting.addSupportedAsset(address(0));
+        vm.expectRevert(IMonogramMinting.InvalidAssetAddress.selector);
+        minting.addSupportedAsset(address(0), _defaultTokenConfig());
     }
 
     function test_AddSupportedAsset_Duplicate() public {
         vm.prank(admin);
         vm.expectRevert(IMonogramMinting.InvalidAssetAddress.selector);
-        minting.addSupportedAsset(address(collateral));
+        minting.addSupportedAsset(address(collateral), _defaultTokenConfig());
     }
 
     function test_RemoveSupportedAsset() public {
@@ -350,7 +447,7 @@ contract MonogramMintingTest is Test {
     // ----------- Mint -----------
 
     function test_Mint() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -362,11 +459,12 @@ contract MonogramMintingTest is Test {
 
         assertEq(collateral.balanceOf(benefactor), benefactorCollateralBefore - 100 ether);
         assertEq(m.balanceOf(benefactor), benefactorMBalanceBefore + 100 ether);
-        assertEq(minting.mintedPerBlock(block.number), 100 ether);
+        (uint256 mintedPerBlock,) = minting.totalPerBlock(block.number);
+        assertEq(mintedPerBlock, 100 ether);
     }
 
     function test_Mint_InvalidOrderType() public {
-        IMonogramMinting.Order memory order = _createRedeemOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createRedeemOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -376,7 +474,7 @@ contract MonogramMintingTest is Test {
     }
 
     function test_Mint_NotMinter() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -386,7 +484,7 @@ contract MonogramMintingTest is Test {
     }
 
     function test_Mint_ExpiredSignature() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         order.expiry = block.timestamp - 1;
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
@@ -397,17 +495,17 @@ contract MonogramMintingTest is Test {
     }
 
     function test_Mint_InvalidSignature() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, delegatePrivateKey);
 
         vm.prank(minter);
-        vm.expectRevert(IMonogramMinting.InvalidSignature.selector);
+        vm.expectRevert(IMonogramMinting.InvalidEIP712Signature.selector);
         minting.mint(order, route, sig);
     }
 
     function test_Mint_InvalidRoute() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
         // Route with only one custodian but ratio 10000
@@ -422,7 +520,7 @@ contract MonogramMintingTest is Test {
     }
 
     function test_Mint_InvalidRoute_BadRatio() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
         address[] memory addresses = new address[](2);
@@ -438,8 +536,27 @@ contract MonogramMintingTest is Test {
         minting.mint(order, route, sig);
     }
 
+    function test_Mint_InvalidRoute_ZeroRatio() public {
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        address[] memory addresses = new address[](2);
+        addresses[0] = custodian1;
+        addresses[1] = custodian2;
+        uint256[] memory ratios = new uint256[](2);
+        ratios[0] = 10_000;
+        ratios[1] = 0; // 单项 ratio 为 0 视为非法路由
+        IMonogramMinting.Route memory route = IMonogramMinting.Route({addresses: addresses, ratios: ratios});
+
+        assertFalse(minting.verifyRoute(route));
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.InvalidRoute.selector);
+        minting.mint(order, route, sig);
+    }
+
     function test_Mint_ReplayAttack() public {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -454,7 +571,7 @@ contract MonogramMintingTest is Test {
     function test_Mint_MultipleNonces() public {
         IMonogramMinting.Route memory route = _createRoute();
 
-        for (uint256 i = 0; i < 5; i++) {
+        for (uint256 i = 1; i <= 5; i++) {
             IMonogramMinting.Order memory order = _createMintOrder(i, 10 ether, 10 ether);
             IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -463,7 +580,8 @@ contract MonogramMintingTest is Test {
         }
 
         assertEq(m.balanceOf(benefactor), 50 ether);
-        assertEq(minting.mintedPerBlock(block.number), 50 ether);
+        (uint256 mintedPerBlock,) = minting.totalPerBlock(block.number);
+        assertEq(mintedPerBlock, 50 ether);
     }
 
     // ----------- Price Validation -----------
@@ -472,15 +590,16 @@ contract MonogramMintingTest is Test {
         // 6 位小数抵押品（类 USDC），价格 $1：100e6 = $100，应铸出 100 M
         MockERC20WithDecimals usdc = new MockERC20WithDecimals("USD Coin", "USDC", 6);
         vm.prank(admin);
-        minting.addSupportedAsset(address(usdc));
+        minting.addSupportedAsset(address(usdc), _defaultTokenConfig());
         usdc.mint(benefactor, 10_000e6);
         vm.prank(benefactor);
         usdc.approve(address(minting), type(uint256).max);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_id: "order-1",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: address(usdc),
@@ -502,7 +621,7 @@ contract MonogramMintingTest is Test {
         vm.warp(10_000);
         mockPriceFeed.setPrice(1e18, block.timestamp - 3601);
 
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -511,14 +630,57 @@ contract MonogramMintingTest is Test {
         minting.mint(order, route, sig);
     }
 
+    // ----------- Order Validation -----------
+
+    function test_Mint_ZeroBeneficiary() public {
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.beneficiary = address(0);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.InvalidAddress.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_Mint_ZeroCollateralAmount() public {
+        IMonogramMinting.Order memory order = _createMintOrder(1, 0, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.InvalidAmount.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_Mint_ZeroMAmount() public {
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 0);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.InvalidAmount.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_Mint_ZeroNonce() public {
+        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.InvalidNonce.selector);
+        minting.mint(order, route, sig);
+    }
+
     // ----------- Per-Block Limits -----------
 
-    function test_Mint_MaxPerBlockExceeded() public {
-        // Set a small limit
+    function test_Mint_MaxMintPerBlockExceeded() public {
+        // 调低单资产限额，global 限额保持高位
         vm.prank(admin);
-        minting.setMaxMintPerBlock(50 ether);
+        minting.setMaxMintPerBlock(50 ether, address(collateral));
 
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
@@ -527,11 +689,48 @@ contract MonogramMintingTest is Test {
         minting.mint(order, route, sig);
     }
 
+    function test_Mint_GlobalMaxMintPerBlockExceeded() public {
+        vm.prank(admin);
+        minting.setGlobalMaxMintPerBlock(50 ether);
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.GlobalMaxMintPerBlockExceeded.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_Redeem_MaxRedeemPerBlockExceeded() public {
+        vm.prank(admin);
+        minting.setMaxRedeemPerBlock(50 ether, address(collateral));
+
+        IMonogramMinting.Order memory order = _createRedeemOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(redeemer);
+        vm.expectRevert(IMonogramMinting.MaxRedeemPerBlockExceeded.selector);
+        minting.redeem(order, sig);
+    }
+
+    function test_Redeem_GlobalMaxRedeemPerBlockExceeded() public {
+        vm.prank(admin);
+        minting.setGlobalMaxRedeemPerBlock(50 ether);
+
+        IMonogramMinting.Order memory order = _createRedeemOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(redeemer);
+        vm.expectRevert(IMonogramMinting.GlobalMaxRedeemPerBlockExceeded.selector);
+        minting.redeem(order, sig);
+    }
+
     // ----------- Redeem -----------
 
     function test_Redeem() public {
         // First mint to have M to redeem
-        IMonogramMinting.Order memory mintOrder = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory mintOrder = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Route memory route = _createRoute();
         IMonogramMinting.Signature memory mintSig = _signOrder(mintOrder, benefactorPrivateKey);
         vm.prank(minter);
@@ -544,7 +743,7 @@ contract MonogramMintingTest is Test {
         // Send collateral to contract for redeem
         collateral.mint(address(minting), 100 ether);
 
-        IMonogramMinting.Order memory redeemOrder = _createRedeemOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Order memory redeemOrder = _createRedeemOrder(2, 100 ether, 100 ether);
         IMonogramMinting.Signature memory redeemSig = _signOrder(redeemOrder, benefactorPrivateKey);
 
         uint256 benefactorCollateralBefore = collateral.balanceOf(benefactor);
@@ -555,11 +754,12 @@ contract MonogramMintingTest is Test {
 
         assertEq(collateral.balanceOf(benefactor), benefactorCollateralBefore + 100 ether);
         assertEq(m.balanceOf(benefactor), benefactorMBalanceBefore - 100 ether);
-        assertEq(minting.redeemedPerBlock(block.number), 100 ether);
+        (, uint256 redeemedPerBlock) = minting.totalPerBlock(block.number);
+        assertEq(redeemedPerBlock, 100 ether);
     }
 
     function test_Redeem_NotRedeemer() public {
-        IMonogramMinting.Order memory order = _createRedeemOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createRedeemOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
         vm.prank(user);
@@ -573,8 +773,14 @@ contract MonogramMintingTest is Test {
         vm.prank(gatekeeper);
         minting.disableMintRedeem();
 
-        assertEq(minting.maxMintPerBlock(), 0);
-        assertEq(minting.maxRedeemPerBlock(), 0);
+        // 只清零 global 限额，单资产限额保持不变
+        (uint256 globalMaxMintPerBlock, uint256 globalMaxRedeemPerBlock) = minting.globalConfig();
+        assertEq(globalMaxMintPerBlock, 0);
+        assertEq(globalMaxRedeemPerBlock, 0);
+        (bool isActive, uint256 maxMintPerBlock, uint256 maxRedeemPerBlock) = minting.tokenConfig(address(collateral));
+        assertTrue(isActive);
+        assertEq(maxMintPerBlock, MAX_MINT_PER_BLOCK);
+        assertEq(maxRedeemPerBlock, MAX_REDEEM_PER_BLOCK);
     }
 
     function test_GatekeeperRemoveMinterRole() public {
@@ -622,6 +828,174 @@ contract MonogramMintingTest is Test {
 
         vm.prank(benefactor);
         minting.removeDelegatedSigner(delegate);
+    }
+
+    // ----------- EIP-1271 -----------
+
+    function test_VerifyOrder_EIP1271() public {
+        MockEIP1271Wallet wallet = new MockEIP1271Wallet(vm.addr(walletSignerPrivateKey));
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.benefactor = address(wallet);
+        order.beneficiary = address(wallet);
+        IMonogramMinting.Signature memory sig = _signOrder(order, walletSignerPrivateKey);
+        sig.signature_type = IMonogramMinting.SignatureType.EIP1271;
+
+        bytes32 hash = minting.verifyOrder(order, sig);
+        assertEq(hash, minting.hashOrder(order));
+    }
+
+    function test_VerifyOrder_EIP1271_Invalid() public {
+        MockEIP1271Wallet wallet = new MockEIP1271Wallet(vm.addr(walletSignerPrivateKey));
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.benefactor = address(wallet);
+        order.beneficiary = address(wallet);
+        // 用错误的私钥签名，钱包恢复出的 signer 不匹配
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+        sig.signature_type = IMonogramMinting.SignatureType.EIP1271;
+
+        vm.expectRevert(IMonogramMinting.InvalidEIP1271Signature.selector);
+        minting.verifyOrder(order, sig);
+    }
+
+    function test_Mint_EIP1271() public {
+        MockEIP1271Wallet wallet = new MockEIP1271Wallet(vm.addr(walletSignerPrivateKey));
+        collateral.mint(address(wallet), 1000 ether);
+        wallet.approveToken(IERC20(address(collateral)), address(minting), type(uint256).max);
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.benefactor = address(wallet);
+        order.beneficiary = address(wallet);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, walletSignerPrivateKey);
+        sig.signature_type = IMonogramMinting.SignatureType.EIP1271;
+
+        vm.prank(minter);
+        minting.mint(order, route, sig);
+
+        assertEq(m.balanceOf(address(wallet)), 100 ether);
+        assertEq(collateral.balanceOf(custodian1), 50 ether);
+        assertEq(collateral.balanceOf(custodian2), 50 ether);
+    }
+
+    // ----------- Whitelist -----------
+
+    function test_Whitelist_DefaultOff() public {
+        assertFalse(minting.whitelistEnabled());
+
+        // 默认关闭：未白名单的 benefactor 也可正常 mint
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        minting.mint(order, route, sig);
+
+        assertEq(m.balanceOf(benefactor), 100 ether);
+    }
+
+    function test_Whitelist_Enabled_BenefactorNotWhitelisted() public {
+        vm.prank(admin);
+        minting.setWhitelistEnabled(true);
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.BenefactorNotWhitelisted.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_Whitelist_WhitelistedBenefactor_MintToSelf() public {
+        vm.startPrank(admin);
+        minting.setWhitelistEnabled(true);
+        minting.addWhitelistedBenefactor(benefactor);
+        vm.stopPrank();
+
+        assertTrue(minting.isWhitelistedBenefactor(benefactor));
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        minting.mint(order, route, sig);
+
+        assertEq(m.balanceOf(benefactor), 100 ether);
+    }
+
+    function test_Whitelist_BeneficiaryNotApproved() public {
+        vm.startPrank(admin);
+        minting.setWhitelistEnabled(true);
+        minting.addWhitelistedBenefactor(benefactor);
+        vm.stopPrank();
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.beneficiary = beneficiary;
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.BeneficiaryNotApproved.selector);
+        minting.mint(order, route, sig);
+
+        // benefactor 批准 beneficiary 后可 mint（换 nonce 避免重放）
+        vm.prank(benefactor);
+        minting.setApprovedBeneficiary(beneficiary, true);
+        assertTrue(minting.isApprovedBeneficiary(benefactor, beneficiary));
+
+        IMonogramMinting.Order memory order2 = _createMintOrder(2, 100 ether, 100 ether);
+        order2.beneficiary = beneficiary;
+        IMonogramMinting.Signature memory sig2 = _signOrder(order2, benefactorPrivateKey);
+
+        vm.prank(minter);
+        minting.mint(order2, route, sig2);
+
+        assertEq(m.balanceOf(beneficiary), 100 ether);
+    }
+
+    function test_Whitelist_RemoveBenefactor() public {
+        vm.startPrank(admin);
+        minting.setWhitelistEnabled(true);
+        minting.addWhitelistedBenefactor(benefactor);
+        minting.removeWhitelistedBenefactor(benefactor);
+        vm.stopPrank();
+
+        assertFalse(minting.isWhitelistedBenefactor(benefactor));
+
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.BenefactorNotWhitelisted.selector);
+        minting.mint(order, route, sig);
+    }
+
+    function test_SetApprovedBeneficiary_RemoveApproval() public {
+        vm.startPrank(benefactor);
+        minting.setApprovedBeneficiary(beneficiary, true);
+        assertTrue(minting.isApprovedBeneficiary(benefactor, beneficiary));
+
+        minting.setApprovedBeneficiary(beneficiary, false);
+        assertFalse(minting.isApprovedBeneficiary(benefactor, beneficiary));
+        vm.stopPrank();
+    }
+
+    function test_SetApprovedBeneficiary_AddTwice() public {
+        vm.startPrank(benefactor);
+        minting.setApprovedBeneficiary(beneficiary, true);
+        vm.expectRevert(IMonogramMinting.InvalidBeneficiaryAddress.selector);
+        minting.setApprovedBeneficiary(beneficiary, true);
+        vm.stopPrank();
+    }
+
+    function test_SetApprovedBeneficiary_RemoveNotApproved() public {
+        vm.prank(benefactor);
+        vm.expectRevert(IMonogramMinting.InvalidBeneficiaryAddress.selector);
+        minting.setApprovedBeneficiary(beneficiary, false);
     }
 
     // ----------- Transfer to Custody -----------
@@ -686,6 +1060,11 @@ contract MonogramMintingTest is Test {
         assertEq(invalidatorBit, 1 << 5); // 32
     }
 
+    function test_VerifyNonce_ZeroNonce() public {
+        vm.expectRevert(IMonogramMinting.InvalidNonce.selector);
+        minting.verifyNonce(benefactor, 0);
+    }
+
     function test_VerifyNonce_LargeNonce() public view {
         (uint256 slot, uint256 invalidator, uint256 invalidatorBit) = minting.verifyNonce(benefactor, 300);
         assertEq(slot, 1); // 300 >> 8 = 1
@@ -696,33 +1075,82 @@ contract MonogramMintingTest is Test {
     // ----------- Set Limits -----------
 
     function test_SetMaxMintPerBlock() public {
+        vm.expectEmit(true, true, true, true, address(minting));
+        emit MaxMintPerBlockChanged(MAX_MINT_PER_BLOCK, 5000 ether, address(collateral));
+
         vm.prank(admin);
-        minting.setMaxMintPerBlock(5000 ether);
-        assertEq(minting.maxMintPerBlock(), 5000 ether);
+        minting.setMaxMintPerBlock(5000 ether, address(collateral));
+
+        (, uint256 maxMintPerBlock,) = minting.tokenConfig(address(collateral));
+        assertEq(maxMintPerBlock, 5000 ether);
     }
 
     function test_SetMaxRedeemPerBlock() public {
+        vm.expectEmit(true, true, true, true, address(minting));
+        emit MaxRedeemPerBlockChanged(MAX_REDEEM_PER_BLOCK, 5000 ether, address(collateral));
+
         vm.prank(admin);
-        minting.setMaxRedeemPerBlock(5000 ether);
-        assertEq(minting.maxRedeemPerBlock(), 5000 ether);
+        minting.setMaxRedeemPerBlock(5000 ether, address(collateral));
+
+        (,, uint256 maxRedeemPerBlock) = minting.tokenConfig(address(collateral));
+        assertEq(maxRedeemPerBlock, 5000 ether);
+    }
+
+    function test_SetGlobalMaxMintPerBlock() public {
+        vm.prank(admin);
+        minting.setGlobalMaxMintPerBlock(5000 ether);
+
+        (uint256 globalMaxMintPerBlock,) = minting.globalConfig();
+        assertEq(globalMaxMintPerBlock, 5000 ether);
+    }
+
+    function test_SetGlobalMaxRedeemPerBlock() public {
+        vm.prank(admin);
+        minting.setGlobalMaxRedeemPerBlock(5000 ether);
+
+        (, uint256 globalMaxRedeemPerBlock) = minting.globalConfig();
+        assertEq(globalMaxRedeemPerBlock, 5000 ether);
     }
 
     function test_SetMaxMintPerBlock_NotAdmin() public {
         vm.prank(user);
         vm.expectRevert();
-        minting.setMaxMintPerBlock(5000 ether);
+        minting.setMaxMintPerBlock(5000 ether, address(collateral));
     }
 
     // ----------- Hash / Encode Order -----------
 
     function test_HashOrder() public view {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         bytes32 hash = minting.hashOrder(order);
         assertTrue(hash != bytes32(0));
+        assertEq(hash, _hashOrder(order));
+    }
+
+    function test_HashOrder_DifferentOrderId() public view {
+        IMonogramMinting.Order memory order1 = _createMintOrder(1, 100 ether, 100 ether);
+        order1.order_id = "order-1";
+        IMonogramMinting.Order memory order2 = _createMintOrder(1, 100 ether, 100 ether);
+        order2.order_id = "order-2";
+
+        assertTrue(minting.hashOrder(order1) != minting.hashOrder(order2));
+    }
+
+    function test_Mint_EmitsOrderId() public {
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        order.order_id = "order-42";
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.expectEmit(true, true, true, true, address(minting));
+        emit Mint("order-42", benefactor, benefactor, minter, address(collateral), 100 ether, 100 ether);
+
+        vm.prank(minter);
+        minting.mint(order, route, sig);
     }
 
     function test_EncodeOrder() public view {
-        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         bytes memory encoded = minting.encodeOrder(order);
         assertTrue(encoded.length > 0);
     }
