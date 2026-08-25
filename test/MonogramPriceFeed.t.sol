@@ -61,12 +61,9 @@ contract MonogramPriceFeedTest is Test {
         vm.stopPrank();
 
         // Set mock Pyth price at $3000 ETH, expo -8
-        mockPyth.setPrice(FEED_ID, IPyth.Price({
-            price: 3000_00000000,
-            conf: 1,
-            expo: -8,
-            publishTime: uint64(block.timestamp)
-        }));
+        mockPyth.setPrice(
+            FEED_ID, IPyth.Price({price: 3000_00000000, conf: 1, expo: -8, publishTime: uint64(block.timestamp)})
+        );
 
         // Set mock Chainlink price at $3000, decimals 8
         mockCl.setAnswer(3000_00000000, 8);
@@ -84,7 +81,7 @@ contract MonogramPriceFeedTest is Test {
     function test_SetOracleConfig() public {
         vm.prank(oracleAdmin);
         priceFeed.setOracleConfig(makeAddr("ETH"), FEED_ID, address(mockCl), 3600, 50);
-        (,,, , bool exists) = priceFeed.configs(makeAddr("ETH"));
+        (,,,, bool exists) = priceFeed.configs(makeAddr("ETH"));
         assertTrue(exists);
     }
 
@@ -99,7 +96,7 @@ contract MonogramPriceFeedTest is Test {
         priceFeed.setOracleConfig(makeAddr("ETH"), FEED_ID, address(mockCl), 3600, 50);
         priceFeed.removeOracleConfig(makeAddr("ETH"));
         vm.stopPrank();
-        (,,, , bool exists) = priceFeed.configs(makeAddr("ETH"));
+        (,,,, bool exists) = priceFeed.configs(makeAddr("ETH"));
         assertFalse(exists);
     }
 
@@ -117,6 +114,45 @@ contract MonogramPriceFeedTest is Test {
         mockCl.setAnswer(3100_00000000, 8);
 
         vm.expectRevert(IMonogramPriceFeed.OracleDeviationExceeded.selector);
+        priceFeed.getPrice(makeAddr("ETH"));
+    }
+
+    function test_GetPrice_ReturnsOldestTimestamp() public {
+        vm.warp(10_000);
+        vm.prank(oracleAdmin);
+        priceFeed.setOracleConfig(makeAddr("ETH"), FEED_ID, address(mockCl), 3600, 500);
+
+        // Pyth 比 Chainlink 新：updatedAt 应取较旧的 Chainlink 时间戳
+        mockPyth.setPrice(
+            FEED_ID, IPyth.Price({price: 3000_00000000, conf: 1, expo: -8, publishTime: uint64(block.timestamp - 100)})
+        );
+        mockCl.setAnswerAndTime(3000_00000000, 8, block.timestamp - 200);
+
+        (, uint256 updatedAt) = priceFeed.getPrice(makeAddr("ETH"));
+        assertEq(updatedAt, block.timestamp - 200);
+    }
+
+    function test_GetPrice_PythConfidenceTooWide() public {
+        vm.prank(oracleAdmin);
+        priceFeed.setOracleConfig(makeAddr("ETH"), FEED_ID, address(mockCl), 3600, 500);
+
+        // conf = 50e8，price = 3000e8 → 1.67% > 1% 上限
+        mockPyth.setPrice(
+            FEED_ID,
+            IPyth.Price({price: 3000_00000000, conf: 50_00000000, expo: -8, publishTime: uint64(block.timestamp)})
+        );
+
+        vm.expectRevert(IMonogramPriceFeed.PriceConfidenceTooWide.selector);
+        priceFeed.getPrice(makeAddr("ETH"));
+    }
+
+    function test_GetPrice_InvalidPythPrice() public {
+        vm.prank(oracleAdmin);
+        priceFeed.setOracleConfig(makeAddr("ETH"), FEED_ID, address(mockCl), 3600, 500);
+
+        mockPyth.setPrice(FEED_ID, IPyth.Price({price: 0, conf: 0, expo: -8, publishTime: uint64(block.timestamp)}));
+
+        vm.expectRevert(IMonogramPriceFeed.InvalidPythPrice.selector);
         priceFeed.getPrice(makeAddr("ETH"));
     }
 }

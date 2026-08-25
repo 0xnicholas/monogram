@@ -6,6 +6,8 @@ interface IMonogramPriceFeed {
     error StalePythPrice();
     error StaleChainlinkPrice();
     error OracleDeviationExceeded();
+    error InvalidPythPrice();
+    error PriceConfidenceTooWide();
 
     event OracleConfigSet(
         address indexed asset, bytes32 pythFeed, address chainlinkFeed, uint128 maxAge, uint128 maxDeviation
@@ -14,7 +16,12 @@ interface IMonogramPriceFeed {
 
     function getPrice(address asset) external view returns (uint256 price, uint256 updatedAt);
     function getPriceAndTimestamp(address asset) external view returns (uint256, uint256);
-    function setOracleConfig(address asset, bytes32 pythFeed, address chainlinkFeed, uint128 maxAge, uint128 maxDeviation)
-        external;
+    function setOracleConfig(
+        address asset,
+        bytes32 pythFeed,
+        address chainlinkFeed,
+        uint128 maxAge,
+        uint128 maxDeviation
+    ) external;
     function removeOracleConfig(address asset) external;
 }

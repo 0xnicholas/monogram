@@ -9,6 +9,9 @@ import "./interfaces/AggregatorV3Interface.sol";
 contract MonogramPriceFeed is IMonogramPriceFeed, AccessControl {
     bytes32 public constant ORACLE_ADMIN_ROLE = keccak256("ORACLE_ADMIN_ROLE");
 
+    /// @notice Pyth 置信区间上限：conf/price 超过 100bps（1%）视为价格不可靠
+    uint256 public constant MAX_CONF_RATIO_BPS = 100;
+
     struct OracleConfig {
         bytes32 pythFeed;
         address chainlinkFeed;
@@ -53,7 +56,8 @@ contract MonogramPriceFeed is IMonogramPriceFeed, AccessControl {
         if (deviation > cfg.maxDeviation) revert OracleDeviationExceeded();
 
         price = (pythPrice + clPrice) / 2;
-        updatedAt = block.timestamp;
+        // 返回双源中较旧的时间戳（保守原则），供下游 StalePrice 检查使用
+        updatedAt = pythTime < clTime ? pythTime : clTime;
     }
 
     function setOracleConfig(
@@ -90,6 +94,11 @@ contract MonogramPriceFeed is IMonogramPriceFeed, AccessControl {
 
     function _readPyth(IPyth pyth, bytes32 feedId) internal view returns (uint256 price, uint256 publishTime) {
         IPyth.Price memory p = pyth.getPriceUnsafe(feedId);
+        if (p.price <= 0) revert InvalidPythPrice();
+        // conf 与 price 同一 expo，直接比较原始值
+        if (uint256(p.conf) * 10_000 > uint256(uint64(p.price)) * MAX_CONF_RATIO_BPS) {
+            revert PriceConfidenceTooWide();
+        }
         int256 exponent = int256(p.expo) + 18;
         if (exponent >= 0) {
             price = uint256(int256(p.price) * int256(10 ** uint256(exponent)));
