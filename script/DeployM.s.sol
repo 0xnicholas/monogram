@@ -26,7 +26,7 @@ contract DeployM is Script {
         DeployConfig memory cfg = DeployConfig({
             admin: vm.addr(deployerPrivateKey),
             weth: vm.envOr("WETH_ADDRESS", address(0)),
-            pyth: vm.envOr("PYTH_ADDRESS", address(0)),
+            pyth: vm.envOr("PYTH_ADDRESS", address(0)), // 用 Pyth 升级版合约地址，见 ADR-0008「Pyth Core 升级」
             assets: _parseAddresses(vm.envOr("ASSETS", string(""))),
             custodians: _parseAddresses(vm.envOr("CUSTODIANS", string(""))),
             maxMintPerBlock: vm.envOr("MAX_MINT_PER_BLOCK", uint256(1_000_000 ether)),

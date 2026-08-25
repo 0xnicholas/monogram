@@ -26,27 +26,32 @@ contract MonogramForkTest is Test {
 
     IWETH9 public weth;
 
-    // Sepolia addresses
-    address public constant SEPOLIA_PYTH = 0xA2aa501b19aff244D90cc15a4Cf739D2725B5729;
-    address public constant SEPOLIA_WETH = 0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9;
-    address public constant SEPOLIA_CHAINLINK_ETH_USD = 0x694AA1769357215DE4FAC081bf1f309aDC325306;
+    // Mainnet addresses（fork 主网而非 Sepolia：Pyth 在测试网是 pull 预言机，
+    // 推送间隔以天计且推送的 publishTime 本身就过期数小时，maxAge=3600 在
+    // Sepolia 任何区块都无法满足；主网有常态化推送，价格新鲜）
+    //
+    // Pyth 用升级版合约（pro-compatible-production）：旧合约 0x4305... 在
+    // 2026-08-26 DAO 原地升级前已停止接收推送，新合约推送正常且接口不变。
+    // 地址来源：pyth-crosschain/contract_manager EvmPriceFeedContracts.json
+    address public constant MAINNET_PYTH = 0x14b9932cc9AC8Ee03301665a8644A753f46D8552;
+    address public constant MAINNET_WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    address public constant MAINNET_CHAINLINK_ETH_USD = 0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419;
     bytes32 public constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
     bytes32 public constant ORDER_TYPE = keccak256(
         "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
-    bytes32 public constant DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
+    bytes32 public constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 public constant NAME_HASH = keccak256("MonogramMinting");
     bytes32 public constant VERSION_HASH = keccak256("1");
 
     function setUp() public {
-        string memory rpcUrl = vm.envOr("SEPOLIA_RPC_URL", string(""));
+        string memory rpcUrl = vm.envOr("MAINNET_RPC_URL", string(""));
         if (bytes(rpcUrl).length > 0) {
             vm.createSelectFork(rpcUrl);
         } else {
-            vm.createSelectFork("sepolia");
+            vm.createSelectFork("mainnet");
         }
 
         benefactor = vm.addr(benefactorPrivateKey);
@@ -59,11 +64,11 @@ contract MonogramForkTest is Test {
         vm.startPrank(admin);
 
         m = new M(admin);
-        weth = IWETH9(payable(SEPOLIA_WETH));
-        priceFeed = new MonogramPriceFeed(admin, SEPOLIA_PYTH);
+        weth = IWETH9(payable(MAINNET_WETH));
+        priceFeed = new MonogramPriceFeed(admin, MAINNET_PYTH);
 
         address[] memory assets = new address[](1);
-        assets[0] = SEPOLIA_WETH;
+        assets[0] = MAINNET_WETH;
 
         address[] memory custodians = new address[](1);
         custodians[0] = custodian;
@@ -85,27 +90,37 @@ contract MonogramForkTest is Test {
         minting.grantRole(keccak256("REDEEMER_ROLE"), redeemer);
         minting.grantRole(keccak256("GATEKEEPER_ROLE"), gatekeeper);
 
-        priceFeed.setOracleConfig(SEPOLIA_WETH, ETH_USD_FEED_ID, SEPOLIA_CHAINLINK_ETH_USD, 3600, 50);
+        priceFeed.setOracleConfig(MAINNET_WETH, ETH_USD_FEED_ID, MAINNET_CHAINLINK_ETH_USD, 3600, 50);
 
         vm.stopPrank();
 
-        deal(SEPOLIA_WETH, benefactor, 10 ether);
+        deal(MAINNET_WETH, benefactor, 10 ether);
         vm.prank(benefactor);
-        IERC20(SEPOLIA_WETH).approve(address(minting), type(uint256).max);
+        IERC20(MAINNET_WETH).approve(address(minting), type(uint256).max);
     }
 
     function _domainSeparator() internal view returns (bytes32) {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(minting)));
     }
 
-    function _signOrder(
-        IMonogramMinting.Order memory order
-    ) internal view returns (IMonogramMinting.Signature memory) {
-        bytes32 structHash = keccak256(abi.encode(
-            ORDER_TYPE, order.order_type, order.expiry, order.nonce,
-            order.benefactor, order.beneficiary, order.collateral_asset,
-            order.collateral_amount, order.m_amount
-        ));
+    function _signOrder(IMonogramMinting.Order memory order)
+        internal
+        view
+        returns (IMonogramMinting.Signature memory)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ORDER_TYPE,
+                order.order_type,
+                order.expiry,
+                order.nonce,
+                order.benefactor,
+                order.beneficiary,
+                order.collateral_asset,
+                order.collateral_amount,
+                order.m_amount
+            )
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(benefactorPrivateKey, digest);
         bytes memory sigBytes = abi.encodePacked(r, s, v);
@@ -124,14 +139,14 @@ contract MonogramForkTest is Test {
     }
 
     function test_PriceFeed_ReadsFromLiveOracle() public view {
-        (uint256 price, uint256 updatedAt) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price, uint256 updatedAt) = priceFeed.getPrice(MAINNET_WETH);
         assertTrue(price > 0, "price should be > 0");
         assertTrue(updatedAt > 0, "updatedAt should be > 0");
         assertTrue(block.timestamp - updatedAt < 3600, "price should be fresh");
     }
 
     function test_ForkMint() public {
-        (uint256 price,) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price,) = priceFeed.getPrice(MAINNET_WETH);
         uint256 mAmount = 1 ether;
         uint256 collateralAmount = (1 ether * 1e18) / price;
 
@@ -144,7 +159,7 @@ contract MonogramForkTest is Test {
             nonce: 0,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
@@ -159,12 +174,14 @@ contract MonogramForkTest is Test {
     }
 
     function test_ForkMint_PriceDeviationExceeded() public {
-        (uint256 price,) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price,) = priceFeed.getPrice(MAINNET_WETH);
         uint256 mAmount = 1 ether;
-        uint256 collateralAmount = (1 ether * 1e18) / price;
+        // 抵押品比公允价值多 5%，配合 100bps 阈值必然超限
+        // （若抵押品按预言机价格精确折算，偏差恒为 0，阈值再低也不会 revert）
+        uint256 collateralAmount = (1 ether * 1e18 * 105) / (price * 100);
 
         vm.prank(admin);
-        minting.setMaxPriceDeviationBps(0);
+        minting.setMaxPriceDeviationBps(100);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
             order_type: IMonogramMinting.OrderType.MINT,
@@ -172,7 +189,7 @@ contract MonogramForkTest is Test {
             nonce: 0,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
@@ -186,7 +203,7 @@ contract MonogramForkTest is Test {
     }
 
     function test_ForkRedeem() public {
-        (uint256 price,) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price,) = priceFeed.getPrice(MAINNET_WETH);
         uint256 mAmount = 1 ether;
         uint256 collateralAmount = (1 ether * 1e18) / price;
 
@@ -199,7 +216,7 @@ contract MonogramForkTest is Test {
             nonce: 0,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
@@ -212,7 +229,7 @@ contract MonogramForkTest is Test {
         m.approve(address(minting), type(uint256).max);
 
         // Fund contract with WETH for redemption
-        deal(SEPOLIA_WETH, address(minting), collateralAmount);
+        deal(MAINNET_WETH, address(minting), collateralAmount);
 
         IMonogramMinting.Order memory redeemOrder = IMonogramMinting.Order({
             order_type: IMonogramMinting.OrderType.REDEEM,
@@ -220,19 +237,19 @@ contract MonogramForkTest is Test {
             nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
 
         uint256 mBefore = m.balanceOf(benefactor);
-        uint256 wethBefore = IERC20(SEPOLIA_WETH).balanceOf(benefactor);
+        uint256 wethBefore = IERC20(MAINNET_WETH).balanceOf(benefactor);
 
         vm.prank(redeemer);
         minting.redeem(redeemOrder, _signOrder(redeemOrder));
 
         assertEq(m.balanceOf(benefactor), mBefore - mAmount, "M should be burned");
-        assertEq(IERC20(SEPOLIA_WETH).balanceOf(benefactor), wethBefore + collateralAmount, "WETH should be returned");
+        assertEq(IERC20(MAINNET_WETH).balanceOf(benefactor), wethBefore + collateralAmount, "WETH should be returned");
     }
 
     function test_Fork_GatekeeperDisable() public {
@@ -243,7 +260,7 @@ contract MonogramForkTest is Test {
     }
 
     function test_Fork_ReplayProtection() public {
-        (uint256 price,) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price,) = priceFeed.getPrice(MAINNET_WETH);
         uint256 mAmount = 0.5 ether;
         uint256 collateralAmount = (mAmount * 1e18) / price;
 
@@ -256,7 +273,7 @@ contract MonogramForkTest is Test {
             nonce: 0,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
@@ -272,7 +289,7 @@ contract MonogramForkTest is Test {
     }
 
     function test_Fork_InvalidSignature() public {
-        (uint256 price,) = priceFeed.getPrice(SEPOLIA_WETH);
+        (uint256 price,) = priceFeed.getPrice(MAINNET_WETH);
         uint256 mAmount = 1 ether;
         uint256 collateralAmount = (1 ether * 1e18) / price;
 
@@ -285,7 +302,7 @@ contract MonogramForkTest is Test {
             nonce: 0,
             benefactor: benefactor,
             beneficiary: benefactor,
-            collateral_asset: SEPOLIA_WETH,
+            collateral_asset: MAINNET_WETH,
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
@@ -294,11 +311,19 @@ contract MonogramForkTest is Test {
 
         // Sign with wrong key
         uint256 wrongKey = 0xB0B;
-        bytes32 structHash = keccak256(abi.encode(
-            ORDER_TYPE, order.order_type, order.expiry, order.nonce,
-            order.benefactor, order.beneficiary, order.collateral_asset,
-            order.collateral_amount, order.m_amount
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ORDER_TYPE,
+                order.order_type,
+                order.expiry,
+                order.nonce,
+                order.benefactor,
+                order.beneficiary,
+                order.collateral_asset,
+                order.collateral_amount,
+                order.m_amount
+            )
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongKey, digest);
         bytes memory sigBytes = abi.encodePacked(r, s, v);
