@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.36;
 
 interface IMonogramMinting {
-
     /* --------------- EVENTS --------------- */
 
     event Received(address, uint256);
@@ -47,6 +46,8 @@ interface IMonogramMinting {
 
     event DelegatedSignerInitiated(address indexed signer, address indexed delegator);
 
+    event MaxPriceDeviationBpsChanged(uint256 oldMaxPriceDeviationBps, uint256 newMaxPriceDeviationBps);
+
     /* -------- */
     enum Role {
         Minter,
@@ -58,7 +59,9 @@ interface IMonogramMinting {
         REDEEM
     }
 
-    enum SignatureType {EIP712}
+    enum SignatureType {
+        EIP712
+    }
 
     enum DelegatedSignerStatus {
         REJECTED,
@@ -86,7 +89,7 @@ interface IMonogramMinting {
         uint256 collateral_amount;
         uint256 m_amount;
     }
-    
+
     /* --------------- ERRORS --------------- */
     error InvalidAddress();
     error InvalidMAddress();
@@ -105,6 +108,8 @@ interface IMonogramMinting {
     error MaxMintPerBlockExceeded();
     error MaxRedeemPerBlockExceeded();
     error DelegationNotInitiated();
+    error StalePrice();
+    error PriceDeviationExceeded();
 
     /* --------------- FUNCTIONS --------------- */
     function hashOrder(Order calldata order) external view returns (bytes32);

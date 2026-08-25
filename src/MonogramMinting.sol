@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.36;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
 
@@ -10,40 +11,44 @@ import "./SingleAdminAccessControl.sol";
 import "./interfaces/IM.sol";
 import "./interfaces/IMonogramMinting.sol";
 import "./interfaces/IWETH9.sol";
+import "./interfaces/IMonogramPriceFeed.sol";
 
 contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
     using EnumerableSet for EnumerableSet.AddressSet;
 
-
     /* --------------- CONSTANTS --------------- */
 
-    bytes32 private constant EIP712_DOMAIN = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant EIP712_DOMAIN =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     bytes32 private constant ROUTE_TYPE = keccak256("Route(address[] addresses,uint256[] ratios)");
 
-    bytes32 private constant ORDER_TYPE = "";
+    bytes32 private constant ORDER_TYPE = keccak256(
+        "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+    );
 
-    bytes32 private constant MINTER_ROLE = "";
+    bytes32 private constant MINTER_ROLE = keccak256("MINTER_ROLE");
 
-    bytes32 private constant REDEEMER_ROLE = "";
+    bytes32 private constant REDEEMER_ROLE = keccak256("REDEEMER_ROLE");
 
-    bytes32 private constant COLLATERAL_MANAGER_ROLE = "";
+    bytes32 private constant COLLATERAL_MANAGER_ROLE = keccak256("COLLATERAL_MANAGER_ROLE");
 
-    bytes32 private constant GATEKEEPER_ROLE = "";
-
-    bytes32 private constant EIP712_DOMAIN_TYPEHASH = "";
+    bytes32 private constant GATEKEEPER_ROLE = keccak256("GATEKEEPER_ROLE");
 
     address private constant NATIVE_TOKEN = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
     bytes32 private constant EIP_712_NAME = keccak256("MonogramMinting");
-    
+
     bytes32 private constant EIP712_REVISION = keccak256("1");
-    
+
     uint256 private constant ROUTE_REQUIRED_RATIO = 10_000;
 
     IWETH9 private immutable WETH;
 
+    IMonogramPriceFeed public immutable priceFeed;
+
+    uint256 public maxPriceDeviationBps = 500;
 
     /* --------------- STATE VARIABLES --------------- */
 
@@ -84,8 +89,9 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     /* --------------- CONSTRUCTOR --------------- */
     constructor(
-        IM _m, 
+        IM _m,
         IWETH9 _weth,
+        IMonogramPriceFeed _priceFeed,
         address[] memory _assets,
         address[] memory _custodians,
         address _admin,
@@ -93,12 +99,13 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         uint256 _maxRedeemPerBlock
     ) {
         if (address(_m) == address(0)) revert InvalidMAddress();
-        if (address(_m) == address(0)) revert InvalidZeroAddress();
+        if (address(_priceFeed) == address(0)) revert InvalidZeroAddress();
         if (_assets.length == 0) revert NoAssetsProvided();
-        if (_admin == address(0)) revert InvalidZeroAddress(); 
+        if (_admin == address(0)) revert InvalidZeroAddress();
 
         m = _m;
         WETH = _weth;
+        priceFeed = _priceFeed;
 
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
 
@@ -145,6 +152,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         mintedPerBlock[block.number] += order.m_amount;
         _transferCollateral(
@@ -161,7 +169,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         );
     }
 
-    function mintWETH(Order calldata order, Route calldata route, Signature calldata signature) 
+    function mintWETH(Order calldata order, Route calldata route, Signature calldata signature)
         external
         nonReentrant
         onlyRole(MINTER_ROLE)
@@ -171,6 +179,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         verifyOrder(order, signature);
         if (!verifyRoute(route)) revert InvalidRoute();
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         mintedPerBlock[block.number] += order.m_amount;
         _transferEthCollateral(
@@ -197,6 +206,7 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         if (order.order_type != OrderType.REDEEM) revert InvalidOrder();
         verifyOrder(order, signature);
         _deduplicateOrder(order.benefactor, order.nonce);
+        _validatePrice(order.collateral_asset, order.collateral_amount, order.m_amount);
 
         redeemedPerBlock[block.number] += order.m_amount;
         m.burnFrom(order.benefactor, order.m_amount);
@@ -217,6 +227,12 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
     function setMaxRedeemPerBlock(uint256 _maxRedeemPerBlock) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _setMaxRedeemPerBlock(_maxRedeemPerBlock);
+    }
+
+    function setMaxPriceDeviationBps(uint256 _maxPriceDeviationBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        uint256 oldValue = maxPriceDeviationBps;
+        maxPriceDeviationBps = _maxPriceDeviationBps;
+        emit MaxPriceDeviationBpsChanged(oldValue, maxPriceDeviationBps);
     }
 
     function disableMintRedeem() external onlyRole(GATEKEEPER_ROLE) {
@@ -249,10 +265,10 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     {
         if (wallet == address(0) || !_custodianAddresses.contains(wallet)) revert InvalidAddress();
         if (asset == NATIVE_TOKEN) {
-        (bool success,) = wallet.call{value: amount}("");
-        if (!success) revert TransferFailed();
+            (bool success,) = wallet.call{value: amount}("");
+            if (!success) revert TransferFailed();
         } else {
-        IERC20(asset).safeTransfer(wallet, amount);
+            IERC20(asset).safeTransfer(wallet, amount);
         }
         emit CustodyTransfer(wallet, asset, amount);
     }
@@ -295,23 +311,38 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     /* --------------- PUBLIC --------------- */
 
     function addSupportedAsset(address asset) public onlyRole(DEFAULT_ADMIN_ROLE) {
-
+        if (asset == address(0)) revert InvalidZeroAddress();
+        if (!_supportedAssets.add(asset)) revert InvalidAssetAddress();
+        emit AssetAdded(asset);
     }
 
     function addCustodianAddress(address custodian) public onlyRole(DEFAULT_ADMIN_ROLE) {
-        
+        if (custodian == address(0)) revert InvalidZeroAddress();
+        if (!_custodianAddresses.add(custodian)) revert InvalidCustodianAddress();
+        emit CustodianAddressAdded(custodian);
     }
 
     function getDomainSeparator() public view returns (bytes32) {
-
+        if (block.chainid == _chainId) return _domainSeparator;
+        return _computeDomainSeparator();
     }
 
     function hashOrder(Order calldata order) public view override returns (bytes32) {
-
+        return keccak256(abi.encodePacked("\x19\x01", getDomainSeparator(), keccak256(encodeOrder(order))));
     }
 
     function encodeOrder(Order calldata order) public pure returns (bytes memory) {
-
+        return abi.encode(
+            ORDER_TYPE,
+            order.order_type,
+            order.expiry,
+            order.nonce,
+            order.benefactor,
+            order.beneficiary,
+            order.collateral_asset,
+            order.collateral_amount,
+            order.m_amount
+        );
     }
 
     function verifyOrder(Order calldata order, Signature calldata signature)
@@ -320,33 +351,75 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         override
         returns (bytes32 taker_order_hash)
     {
-        
+        taker_order_hash = hashOrder(order);
+        if (order.expiry < block.timestamp) revert SignatureExpired();
+        address signer = ECDSA.recover(taker_order_hash, signature.signature_bytes);
+        if (signer != order.benefactor && delegatedSigner[signer][order.benefactor] != DelegatedSignerStatus.ACCEPTED) {
+            revert InvalidSignature();
+        }
     }
 
     function verifyRoute(Route calldata route) public view override returns (bool) {
+        if (route.addresses.length == 0 || route.ratios.length == 0) return false;
+        if (route.addresses.length != route.ratios.length) return false;
+        uint256 totalRatio = 0;
+        for (uint256 i = 0; i < route.ratios.length;) {
+            totalRatio += route.ratios[i];
+            if (!_custodianAddresses.contains(route.addresses[i])) return false;
+            unchecked {
+                ++i;
+            }
+        }
+        return totalRatio == ROUTE_REQUIRED_RATIO;
     }
 
     function verifyNonce(address sender, uint256 nonce) public view override returns (uint256, uint256, uint256) {
+        uint256 invalidatorSlot = nonce >> 8;
+        uint256 invalidator = _orderBitmaps[sender][invalidatorSlot];
+        uint256 invalidatorBit = 1 << (nonce & 0xFF);
+        return (invalidatorSlot, invalidator, invalidatorBit);
     }
 
     /* --------------- PRIVATE --------------- */
     /// @notice deduplication of taker order
     function _deduplicateOrder(address sender, uint256 nonce) private {
         (uint256 invalidatorSlot, uint256 invalidator, uint256 invalidatorBit) = verifyNonce(sender, nonce);
+        if (invalidator & invalidatorBit != 0) revert InvalidNonce();
         _orderBitmaps[sender][invalidatorSlot] = invalidator | invalidatorBit;
     }
 
     /* --------------- INTERNAL --------------- */
 
+    function _validatePrice(address asset, uint256 collateralAmount, uint256 mAmount) internal view {
+        (uint256 price, uint256 timestamp) = priceFeed.getPrice(asset);
+        if (block.timestamp - timestamp > 3600) revert StalePrice();
+        // 将抵押品数量按其 decimals 归一化到 18 位，再与 18 位精度的 price 相乘
+        uint8 assetDecimals = asset == NATIVE_TOKEN ? 18 : IERC20Metadata(asset).decimals();
+        uint256 normalizedAmount = collateralAmount;
+        if (assetDecimals < 18) {
+            normalizedAmount = collateralAmount * (10 ** (18 - assetDecimals));
+        } else if (assetDecimals > 18) {
+            normalizedAmount = collateralAmount / (10 ** (assetDecimals - 18));
+        }
+        uint256 collateralUsd = (normalizedAmount * price) / 1e18;
+        if (collateralUsd == 0 || mAmount == 0) revert InvalidAmount();
+        uint256 deviation = _absDiff(collateralUsd, mAmount) * 10_000 / mAmount;
+        if (deviation > maxPriceDeviationBps) revert PriceDeviationExceeded();
+    }
+
+    function _absDiff(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a - b : b - a;
+    }
+
     /// @notice transfer supported asset to beneficiary address
     function _transferToBeneficiary(address beneficiary, address asset, uint256 amount) internal {
         if (asset == NATIVE_TOKEN) {
-        if (address(this).balance < amount) revert InvalidAmount();
-        (bool success,) = (beneficiary).call{value: amount}("");
-        if (!success) revert TransferFailed();
+            if (address(this).balance < amount) revert InvalidAmount();
+            (bool success,) = (beneficiary).call{value: amount}("");
+            if (!success) revert TransferFailed();
         } else {
-        if (!_supportedAssets.contains(asset)) revert UnsupportedAsset();
-        IERC20(asset).safeTransfer(beneficiary, amount);
+            if (!_supportedAssets.contains(asset)) revert UnsupportedAsset();
+            IERC20(asset).safeTransfer(beneficiary, amount);
         }
     }
 
@@ -363,16 +436,16 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         IERC20 token = IERC20(asset);
         uint256 totalTransferred = 0;
         for (uint256 i = 0; i < addresses.length;) {
-        uint256 amountToTransfer = (amount * ratios[i]) / ROUTE_REQUIRED_RATIO;
-        token.safeTransferFrom(benefactor, addresses[i], amountToTransfer);
-        totalTransferred += amountToTransfer;
-        unchecked {
-            ++i;
-        }
+            uint256 amountToTransfer = (amount * ratios[i]) / ROUTE_REQUIRED_RATIO;
+            token.safeTransferFrom(benefactor, addresses[i], amountToTransfer);
+            totalTransferred += amountToTransfer;
+            unchecked {
+                ++i;
+            }
         }
         uint256 remainingBalance = amount - totalTransferred;
         if (remainingBalance > 0) {
-        token.safeTransferFrom(benefactor, addresses[addresses.length - 1], remainingBalance);
+            token.safeTransferFrom(benefactor, addresses[addresses.length - 1], remainingBalance);
         }
     }
 
@@ -384,7 +457,9 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         address[] calldata addresses,
         uint256[] calldata ratios
     ) internal {
-        if (!_supportedAssets.contains(asset) || asset == NATIVE_TOKEN || asset != address(WETH)) revert UnsupportedAsset();
+        if (!_supportedAssets.contains(asset) || asset == NATIVE_TOKEN || asset != address(WETH)) {
+            revert UnsupportedAsset();
+        }
         IERC20 token = IERC20(asset);
         token.safeTransferFrom(benefactor, address(this), amount);
 
@@ -392,18 +467,18 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
 
         uint256 totalTransferred = 0;
         for (uint256 i = 0; i < addresses.length;) {
-        uint256 amountToTransfer = (amount * ratios[i]) / ROUTE_REQUIRED_RATIO;
-        (bool success,) = addresses[i].call{value: amountToTransfer}("");
-        if (!success) revert TransferFailed();
-        totalTransferred += amountToTransfer;
-        unchecked {
-            ++i;
-        }
+            uint256 amountToTransfer = (amount * ratios[i]) / ROUTE_REQUIRED_RATIO;
+            (bool success,) = addresses[i].call{value: amountToTransfer}("");
+            if (!success) revert TransferFailed();
+            totalTransferred += amountToTransfer;
+            unchecked {
+                ++i;
+            }
         }
         uint256 remainingBalance = amount - totalTransferred;
         if (remainingBalance > 0) {
-        (bool success,) = addresses[addresses.length - 1].call{value: remainingBalance}("");
-        if (!success) revert TransferFailed();
+            (bool success,) = addresses[addresses.length - 1].call{value: remainingBalance}("");
+            if (!success) revert TransferFailed();
         }
     }
 
