@@ -39,7 +39,7 @@ contract MonogramForkTest is Test {
     bytes32 public constant ETH_USD_FEED_ID = 0xff61491a931112ddf1bd8147cd1b641375f79f5825126d665480874634fd0ace;
 
     bytes32 public constant ORDER_TYPE = keccak256(
-        "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
+        "Order(string order_id,uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
     bytes32 public constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -73,15 +73,23 @@ contract MonogramForkTest is Test {
         address[] memory custodians = new address[](1);
         custodians[0] = custodian;
 
+        IMonogramMinting.TokenConfig[] memory tokenConfigs = new IMonogramMinting.TokenConfig[](1);
+        tokenConfigs[0] = IMonogramMinting.TokenConfig({
+            isActive: true, maxMintPerBlock: 1_000_000 ether, maxRedeemPerBlock: 1_000_000 ether
+        });
+        IMonogramMinting.GlobalConfig memory globalConfig = IMonogramMinting.GlobalConfig({
+            globalMaxMintPerBlock: 1_000_000 ether, globalMaxRedeemPerBlock: 1_000_000 ether
+        });
+
         minting = new MonogramMinting(
             IM(address(m)),
             weth,
             IMonogramPriceFeed(address(priceFeed)),
             assets,
+            tokenConfigs,
+            globalConfig,
             custodians,
-            admin,
-            1_000_000 ether,
-            1_000_000 ether
+            admin
         );
 
         m.setMinter(address(minting));
@@ -107,6 +115,7 @@ contract MonogramForkTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 ORDER_TYPE,
+                keccak256(bytes(order.order_id)),
                 order.order_type,
                 order.expiry,
                 order.nonce,
@@ -150,9 +159,10 @@ contract MonogramForkTest is Test {
         minting.setMaxPriceDeviationBps(1000);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_id: "fork-order",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -180,9 +190,10 @@ contract MonogramForkTest is Test {
         minting.setMaxPriceDeviationBps(100);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_id: "fork-order",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -207,9 +218,10 @@ contract MonogramForkTest is Test {
         minting.setMaxPriceDeviationBps(1000);
 
         IMonogramMinting.Order memory mintOrder = IMonogramMinting.Order({
+            order_id: "fork-order",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -228,9 +240,10 @@ contract MonogramForkTest is Test {
         deal(MAINNET_WETH, address(minting), collateralAmount);
 
         IMonogramMinting.Order memory redeemOrder = IMonogramMinting.Order({
+            order_id: "fork-redeem-1",
             order_type: IMonogramMinting.OrderType.REDEEM,
             expiry: block.timestamp + 1 hours,
-            nonce: 1,
+            nonce: 2,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -251,8 +264,9 @@ contract MonogramForkTest is Test {
     function test_Fork_GatekeeperDisable() public {
         vm.prank(gatekeeper);
         minting.disableMintRedeem();
-        assertEq(minting.maxMintPerBlock(), 0);
-        assertEq(minting.maxRedeemPerBlock(), 0);
+        (uint256 globalMaxMint, uint256 globalMaxRedeem) = minting.globalConfig();
+        assertEq(globalMaxMint, 0);
+        assertEq(globalMaxRedeem, 0);
     }
 
     function test_Fork_ReplayProtection() public {
@@ -264,9 +278,10 @@ contract MonogramForkTest is Test {
         minting.setMaxPriceDeviationBps(1000);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_id: "fork-order",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -293,9 +308,10 @@ contract MonogramForkTest is Test {
         minting.setMaxPriceDeviationBps(1000);
 
         IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_id: "fork-order",
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
-            nonce: 0,
+            nonce: 1,
             benefactor: benefactor,
             beneficiary: benefactor,
             collateral_asset: MAINNET_WETH,
@@ -310,6 +326,7 @@ contract MonogramForkTest is Test {
         bytes32 structHash = keccak256(
             abi.encode(
                 ORDER_TYPE,
+                keccak256(bytes(order.order_id)),
                 order.order_type,
                 order.expiry,
                 order.nonce,
@@ -328,7 +345,7 @@ contract MonogramForkTest is Test {
         });
 
         vm.prank(minter);
-        vm.expectRevert(IMonogramMinting.InvalidSignature.selector);
+        vm.expectRevert(IMonogramMinting.InvalidEIP712Signature.selector);
         minting.mint(order, route, sig);
     }
 }
