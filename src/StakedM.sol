@@ -32,12 +32,10 @@ contract StakedM is IStakedM, ERC4626, AccessControl, ReentrancyGuard {
     }
     mapping(address => RedemptionRequest) public redemptionRequests;
 
-    constructor(
-        IERC20 _asset,
-        address _admin,
-        string memory _name,
-        string memory _symbol
-    ) ERC4626(_asset) ERC20(_name, _symbol) {
+    constructor(IERC20 _asset, address _admin, string memory _name, string memory _symbol)
+        ERC4626(_asset)
+        ERC20(_name, _symbol)
+    {
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
     }
 

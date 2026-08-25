@@ -183,10 +183,10 @@ contract MonogramMintingTest is Test {
         bytes32 digest = _hashOrder(order);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         bytes memory signature = abi.encodePacked(r, s, v);
-        return IMonogramMinting.Signature({
-            signature_type: IMonogramMinting.SignatureType.EIP712,
-            signature_bytes: signature
-        });
+        return
+            IMonogramMinting.Signature({
+                signature_type: IMonogramMinting.SignatureType.EIP712, signature_bytes: signature
+            });
     }
 
     function _createMintOrder(uint256 nonce, uint256 collateralAmount, uint256 mAmount)

@@ -6,7 +6,6 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Burnable.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 
 contract M is Ownable2Step, ERC20Burnable, ERC20Permit {
-
     /// @notice This event is fired when the minter changes
     event MinterUpdated(address indexed newMinter, address indexed oldMinter);
 

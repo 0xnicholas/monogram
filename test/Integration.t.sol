@@ -13,14 +13,20 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract MockAsset is ERC20 {
     constructor() ERC20("Test Collateral", "TC") {}
-    function mint(address to, uint256 amount) external { _mint(to, amount); }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
 }
 
 contract MockPriceFeed is IMonogramPriceFeed {
     function getPrice(address) external view returns (uint256 price, uint256 updatedAt) {
         return (1e18, block.timestamp);
     }
-    function getPriceAndTimestamp(address asset) external view returns (uint256, uint256) { return this.getPrice(asset); }
+
+    function getPriceAndTimestamp(address asset) external view returns (uint256, uint256) {
+        return this.getPrice(asset);
+    }
     function setOracleConfig(address, bytes32, address, uint128, uint128) external {}
     function removeOracleConfig(address) external {}
 }
@@ -54,9 +60,8 @@ contract IntegrationTest is Test {
     bytes32 public constant ORDER_TYPE = keccak256(
         "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
-    bytes32 public constant DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
+    bytes32 public constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 public constant NAME_HASH = keccak256("MonogramMinting");
     bytes32 public constant VERSION_HASH = keccak256("1");
 
@@ -113,18 +118,26 @@ contract IntegrationTest is Test {
     }
 
     function _signOrder(IMonogramMinting.Order memory order) internal view returns (IMonogramMinting.Signature memory) {
-        bytes32 structHash = keccak256(abi.encode(
-            ORDER_TYPE, order.order_type, order.expiry, order.nonce,
-            order.benefactor, order.beneficiary, order.collateral_asset,
-            order.collateral_amount, order.m_amount
-        ));
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ORDER_TYPE,
+                order.order_type,
+                order.expiry,
+                order.nonce,
+                order.benefactor,
+                order.beneficiary,
+                order.collateral_asset,
+                order.collateral_amount,
+                order.m_amount
+            )
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(stakerPrivateKey, digest);
         bytes memory sigBytes = abi.encodePacked(r, s, v);
-        return IMonogramMinting.Signature({
-            signature_type: IMonogramMinting.SignatureType.EIP712,
-            signature_bytes: sigBytes
-        });
+        return
+            IMonogramMinting.Signature({
+                signature_type: IMonogramMinting.SignatureType.EIP712, signature_bytes: sigBytes
+            });
     }
 
     function _singleRoute() internal view returns (IMonogramMinting.Route memory) {

@@ -8,9 +8,8 @@ contract EIP712Helper is Script {
     bytes32 constant ORDER_TYPE = keccak256(
         "Order(uint8 order_type,uint256 expiry,uint256 nonce,address benefactor,address beneficiary,address collateral_asset,uint256 collateral_amount,uint256 m_amount)"
     );
-    bytes32 constant DOMAIN_TYPEHASH = keccak256(
-        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    );
+    bytes32 constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
     bytes32 constant NAME_HASH = keccak256("MonogramMinting");
     bytes32 constant VERSION_HASH = keccak256("1");
 
@@ -28,9 +27,8 @@ contract EIP712Helper is Script {
         uint256 collateralAmount = vm.envUint("COLLATERAL_AMOUNT");
         uint256 mAmount = vm.envUint("M_AMOUNT");
 
-        bytes32 domainSeparator = keccak256(
-            abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, mintingContract)
-        );
+        bytes32 domainSeparator =
+            keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, mintingContract));
 
         bytes32 structHash = keccak256(
             abi.encode(

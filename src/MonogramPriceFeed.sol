@@ -72,11 +72,7 @@ contract MonogramPriceFeed is IMonogramPriceFeed, AccessControl {
         if (maxAge == 0 || maxDeviation == 0) revert();
 
         configs[asset] = OracleConfig({
-            pythFeed: pythFeed,
-            chainlinkFeed: chainlinkFeed,
-            maxAge: maxAge,
-            maxDeviation: maxDeviation,
-            exists: true
+            pythFeed: pythFeed, chainlinkFeed: chainlinkFeed, maxAge: maxAge, maxDeviation: maxDeviation, exists: true
         });
 
         emit OracleConfigSet(asset, pythFeed, chainlinkFeed, maxAge, maxDeviation);

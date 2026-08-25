@@ -103,11 +103,7 @@ contract MonogramForkTest is Test {
         return keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(minting)));
     }
 
-    function _signOrder(IMonogramMinting.Order memory order)
-        internal
-        view
-        returns (IMonogramMinting.Signature memory)
-    {
+    function _signOrder(IMonogramMinting.Order memory order) internal view returns (IMonogramMinting.Signature memory) {
         bytes32 structHash = keccak256(
             abi.encode(
                 ORDER_TYPE,
@@ -124,10 +120,10 @@ contract MonogramForkTest is Test {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(benefactorPrivateKey, digest);
         bytes memory sigBytes = abi.encodePacked(r, s, v);
-        return IMonogramMinting.Signature({
-            signature_type: IMonogramMinting.SignatureType.EIP712,
-            signature_bytes: sigBytes
-        });
+        return
+            IMonogramMinting.Signature({
+                signature_type: IMonogramMinting.SignatureType.EIP712, signature_bytes: sigBytes
+            });
     }
 
     function _singleRoute() internal view returns (IMonogramMinting.Route memory) {
@@ -328,8 +324,7 @@ contract MonogramForkTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wrongKey, digest);
         bytes memory sigBytes = abi.encodePacked(r, s, v);
         IMonogramMinting.Signature memory sig = IMonogramMinting.Signature({
-            signature_type: IMonogramMinting.SignatureType.EIP712,
-            signature_bytes: sigBytes
+            signature_type: IMonogramMinting.SignatureType.EIP712, signature_bytes: sigBytes
         });
 
         vm.prank(minter);

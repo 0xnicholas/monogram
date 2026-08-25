@@ -6,7 +6,7 @@ interface IPyth {
         int64 price;
         uint64 conf;
         int32 expo;
-        uint publishTime;
+        uint256 publishTime;
     }
 
     function getPriceUnsafe(bytes32 id) external view returns (Price memory price);

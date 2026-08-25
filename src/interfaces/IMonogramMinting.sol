@@ -2,7 +2,6 @@
 pragma solidity ^0.8.36;
 
 interface IMonogramMinting {
-
     /* --------------- EVENTS --------------- */
 
     event Received(address, uint256);
@@ -60,7 +59,9 @@ interface IMonogramMinting {
         REDEEM
     }
 
-    enum SignatureType {EIP712}
+    enum SignatureType {
+        EIP712
+    }
 
     enum DelegatedSignerStatus {
         REJECTED,
@@ -88,7 +89,7 @@ interface IMonogramMinting {
         uint256 collateral_amount;
         uint256 m_amount;
     }
-    
+
     /* --------------- ERRORS --------------- */
     error InvalidAddress();
     error InvalidMAddress();

@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/interfaces/IERC5313.sol";
 import "./interfaces/ISingleAdminAccessControl.sol";
 
- abstract contract SingleAdminAccessControl is IERC5313, ISingleAdminAccessControl, AccessControl {
+abstract contract SingleAdminAccessControl is IERC5313, ISingleAdminAccessControl, AccessControl {
     address private _currentDefaultAdmin;
     address private _pendingDefaultAdmin;
 
@@ -50,5 +50,4 @@ import "./interfaces/ISingleAdminAccessControl.sol";
         }
         return super._grantRole(role, account);
     }
-
- }
+}
