@@ -97,3 +97,17 @@ adr/ADR-0012.md  治理与信任模型
 - [Ethena 官方文档](https://docs.ethena.fi/)
 - [EthenaMinting V2 合约](https://etherscan.io/address/0xe3490297a08d6fC8Da46Edb7B6142E4F461b62D3)
 - [Ethena Github](https://github.com/ethena-labs)
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues (`0xnicholas/monogram`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default label vocabulary: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at the repo root + ADRs in `adr/`. See `docs/agents/domain.md`.
