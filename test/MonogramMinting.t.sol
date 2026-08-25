@@ -16,9 +16,33 @@ contract MockERC20 is ERC20 {
     }
 }
 
+contract MockERC20WithDecimals is ERC20 {
+    uint8 private immutable _tokenDecimals;
+
+    constructor(string memory name, string memory symbol, uint8 decimals_) ERC20(name, symbol) {
+        _tokenDecimals = decimals_;
+    }
+
+    function decimals() public view override returns (uint8) {
+        return _tokenDecimals;
+    }
+
+    function mint(address to, uint256 amount) external {
+        _mint(to, amount);
+    }
+}
+
 contract MockPriceFeed is IMonogramPriceFeed {
-    function getPrice(address) external view returns (uint256 price, uint256 updatedAt) {
-        return (1e18, block.timestamp);
+    uint256 public price = 1e18;
+    uint256 public updatedAt; // 0 表示使用 block.timestamp
+
+    function setPrice(uint256 _price, uint256 _updatedAt) external {
+        price = _price;
+        updatedAt = _updatedAt;
+    }
+
+    function getPrice(address) external view returns (uint256, uint256) {
+        return (price, updatedAt == 0 ? block.timestamp : updatedAt);
     }
 
     function getPriceAndTimestamp(address asset) external view returns (uint256, uint256) {
@@ -123,7 +147,8 @@ contract MonogramMintingTest is Test {
     }
 
     function _computeDomainSeparator() internal view returns (bytes32) {
-        bytes32 DOMAIN_TYPEHASH = keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+        bytes32 DOMAIN_TYPEHASH =
+            keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
         bytes32 NAME_HASH = keccak256("MonogramMinting");
         bytes32 VERSION_HASH = keccak256("1");
         return keccak256(abi.encode(DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(minting)));
@@ -158,14 +183,17 @@ contract MonogramMintingTest is Test {
         bytes32 digest = _hashOrder(order);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
         bytes memory signature = abi.encodePacked(r, s, v);
-        return IMonogramMinting.Signature({signature_type: IMonogramMinting.SignatureType.EIP712, signature_bytes: signature});
+        return IMonogramMinting.Signature({
+            signature_type: IMonogramMinting.SignatureType.EIP712,
+            signature_bytes: signature
+        });
     }
 
-    function _createMintOrder(
-        uint256 nonce,
-        uint256 collateralAmount,
-        uint256 mAmount
-    ) internal view returns (IMonogramMinting.Order memory) {
+    function _createMintOrder(uint256 nonce, uint256 collateralAmount, uint256 mAmount)
+        internal
+        view
+        returns (IMonogramMinting.Order memory)
+    {
         return IMonogramMinting.Order({
             order_type: IMonogramMinting.OrderType.MINT,
             expiry: block.timestamp + 1 hours,
@@ -188,11 +216,11 @@ contract MonogramMintingTest is Test {
         return IMonogramMinting.Route({addresses: addresses, ratios: ratios});
     }
 
-    function _createRedeemOrder(
-        uint256 nonce,
-        uint256 collateralAmount,
-        uint256 mAmount
-    ) internal view returns (IMonogramMinting.Order memory) {
+    function _createRedeemOrder(uint256 nonce, uint256 collateralAmount, uint256 mAmount)
+        internal
+        view
+        returns (IMonogramMinting.Order memory)
+    {
         return IMonogramMinting.Order({
             order_type: IMonogramMinting.OrderType.REDEEM,
             expiry: block.timestamp + 1 hours,
@@ -223,7 +251,16 @@ contract MonogramMintingTest is Test {
         address[] memory custodians = new address[](0);
 
         vm.expectRevert(IMonogramMinting.InvalidMAddress.selector);
-        new MonogramMinting(IM(address(0)), IWETH9(payable(address(weth))), IMonogramPriceFeed(address(mockPriceFeed)), assets, custodians, admin, 1000, 1000);
+        new MonogramMinting(
+            IM(address(0)),
+            IWETH9(payable(address(weth))),
+            IMonogramPriceFeed(address(mockPriceFeed)),
+            assets,
+            custodians,
+            admin,
+            1000,
+            1000
+        );
     }
 
     function test_Deployment_NoAssets() public {
@@ -231,7 +268,16 @@ contract MonogramMintingTest is Test {
         address[] memory custodians = new address[](0);
 
         vm.expectRevert(IMonogramMinting.NoAssetsProvided.selector);
-        new MonogramMinting(IM(address(m)), IWETH9(payable(address(weth))), IMonogramPriceFeed(address(mockPriceFeed)), assets, custodians, admin, 1000, 1000);
+        new MonogramMinting(
+            IM(address(m)),
+            IWETH9(payable(address(weth))),
+            IMonogramPriceFeed(address(mockPriceFeed)),
+            assets,
+            custodians,
+            admin,
+            1000,
+            1000
+        );
     }
 
     // ----------- Role Management -----------
@@ -418,6 +464,51 @@ contract MonogramMintingTest is Test {
 
         assertEq(m.balanceOf(benefactor), 50 ether);
         assertEq(minting.mintedPerBlock(block.number), 50 ether);
+    }
+
+    // ----------- Price Validation -----------
+
+    function test_Mint_SixDecimalsCollateral() public {
+        // 6 位小数抵押品（类 USDC），价格 $1：100e6 = $100，应铸出 100 M
+        MockERC20WithDecimals usdc = new MockERC20WithDecimals("USD Coin", "USDC", 6);
+        vm.prank(admin);
+        minting.addSupportedAsset(address(usdc));
+        usdc.mint(benefactor, 10_000e6);
+        vm.prank(benefactor);
+        usdc.approve(address(minting), type(uint256).max);
+
+        IMonogramMinting.Order memory order = IMonogramMinting.Order({
+            order_type: IMonogramMinting.OrderType.MINT,
+            expiry: block.timestamp + 1 hours,
+            nonce: 0,
+            benefactor: benefactor,
+            beneficiary: benefactor,
+            collateral_asset: address(usdc),
+            collateral_amount: 100e6,
+            m_amount: 100 ether
+        });
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        minting.mint(order, route, sig);
+
+        assertEq(m.balanceOf(benefactor), 100 ether);
+        assertEq(usdc.balanceOf(custodian1), 50e6);
+        assertEq(usdc.balanceOf(custodian2), 50e6);
+    }
+
+    function test_Mint_StalePrice() public {
+        vm.warp(10_000);
+        mockPriceFeed.setPrice(1e18, block.timestamp - 3601);
+
+        IMonogramMinting.Order memory order = _createMintOrder(0, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.StalePrice.selector);
+        minting.mint(order, route, sig);
     }
 
     // ----------- Per-Block Limits -----------
