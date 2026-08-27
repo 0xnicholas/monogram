@@ -6,6 +6,7 @@ import "../src/M.sol";
 import "../src/MonogramMinting.sol";
 import "../src/WETH9.sol";
 import "../src/interfaces/IMonogramPriceFeed.sol";
+import "../src/interfaces/ISingleAdminAccessControl.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
@@ -427,6 +428,60 @@ contract MonogramMintingTest is Test {
         vm.prank(user);
         vm.expectRevert();
         minting.grantRole(MINTER_ROLE, user);
+    }
+
+    // ----------- Admin 两步移交（SingleAdminAccessControl）-----------
+
+    function test_AdminTransfer_TwoStep() public {
+        address newAdmin = makeAddr("newAdmin");
+
+        vm.prank(admin);
+        minting.transferAdmin(newAdmin);
+
+        // 请求阶段：admin 未变，ERC-5313 owner 仍指向旧 admin
+        assertTrue(minting.hasRole(minting.DEFAULT_ADMIN_ROLE(), admin));
+        assertEq(minting.owner(), admin);
+
+        vm.prank(newAdmin);
+        minting.acceptAdmin();
+
+        assertTrue(minting.hasRole(minting.DEFAULT_ADMIN_ROLE(), newAdmin));
+        assertFalse(minting.hasRole(minting.DEFAULT_ADMIN_ROLE(), admin));
+        assertEq(minting.owner(), newAdmin);
+    }
+
+    function test_AdminTransfer_NotAdmin() public {
+        vm.prank(user);
+        vm.expectRevert();
+        minting.transferAdmin(user);
+    }
+
+    function test_AdminTransfer_ToSelf() public {
+        vm.prank(admin);
+        vm.expectRevert(ISingleAdminAccessControl.InvalidAdminChange.selector);
+        minting.transferAdmin(admin);
+    }
+
+    function test_AdminTransfer_AcceptNotPending() public {
+        vm.prank(admin);
+        minting.transferAdmin(makeAddr("newAdmin"));
+
+        vm.prank(user);
+        vm.expectRevert(ISingleAdminAccessControl.NotPendingAdmin.selector);
+        minting.acceptAdmin();
+    }
+
+    function test_AdminRole_CannotBeGrantedDirectly() public {
+        // 单 admin 强制语义：不能直接 grant/revoke DEFAULT_ADMIN_ROLE，只能走两步移交
+        bytes32 adminRole = minting.DEFAULT_ADMIN_ROLE();
+
+        vm.prank(admin);
+        vm.expectRevert(ISingleAdminAccessControl.InvalidAdminChange.selector);
+        minting.grantRole(adminRole, user);
+
+        vm.prank(admin);
+        vm.expectRevert(ISingleAdminAccessControl.InvalidAdminChange.selector);
+        minting.revokeRole(adminRole, admin);
     }
 
     function test_RevokeRole() public {

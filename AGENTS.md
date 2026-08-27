@@ -35,7 +35,7 @@ forge script script/DeployM.s.sol --rpc-url sepolia --broadcast
 | `M.sol` | `src/` | ERC20 + Permit + Burnable，单 minter |
 | `MonogramMinting.sol` | `src/` | 铸造/赎回引擎，EIP-712，per-block 限额，价格验证 |
 | `StakedM.sol` | `src/` | ERC-4626 Vault，8h vesting 奖励 |
-| `SingleAdminAccessControl.sol` | `src/` | ❌ 已废弃，改用 OZ AccessControl |
+| `SingleAdminAccessControl.sol` | `src/` | MonogramMinting 的单 admin 权限基座（复刻 Ethena，见 ADR-0004） |
 | `WETH9.sol` | `src/` | 供本地测试用 |
 
 ### 角色
