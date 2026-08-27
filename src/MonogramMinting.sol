@@ -63,7 +63,8 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
     /// @notice approved beneficiaries for a given benefactor（仅当 whitelistEnabled 时强制检查）
     mapping(address => EnumerableSet.AddressSet) private _approvedBeneficiariesPerBenefactor;
 
-    /// @notice Monogram 偏离 V2 点：白名单开关，默认关闭（V2 为强制检查），见 GitHub issue #5 决议
+    /// @notice Monogram 偏离 V2 点：白名单开关，默认关闭（V2 为强制检查），见 GitHub issue #5 决议；
+    /// 主网部署后启用且不可逆（单向棘轮），见 GitHub issue #11 决议
     bool public whitelistEnabled;
 
     EnumerableSet.AddressSet internal _custodianAddresses;
@@ -390,8 +391,12 @@ contract MonogramMinting is IMonogramMinting, SingleAdminAccessControl, Reentran
         emit BenefactorRemoved(benefactor);
     }
 
-    /// @notice Enables or disables the benefactor/beneficiary whitelist checks in verifyOrder
+    /// @notice Enables the benefactor/beneficiary whitelist checks in verifyOrder (one-way ratchet)
+    /// @dev 单向棘轮（#11 决议）：仅允许 false→true，启用后不可逆；关闭白名单在链上不可达，
+    ///      紧急停机用 GATEKEEPER 的 disableMintRedeem
     function setWhitelistEnabled(bool _enabled) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (!_enabled) revert WhitelistDisableNotSupported();
+        if (whitelistEnabled) revert WhitelistAlreadyEnabled();
         whitelistEnabled = _enabled;
         emit WhitelistEnabledSet(_enabled);
     }
