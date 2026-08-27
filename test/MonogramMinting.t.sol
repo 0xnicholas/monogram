@@ -542,19 +542,31 @@ contract MonogramMintingTest is Test {
         minting.mint(order, route, sig);
     }
 
-    function test_Mint_InvalidRoute() public {
+    function test_Mint_SingleCustodianFullRoute() public {
         IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
         IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
 
-        // Route with only one custodian but ratio 10000
+        // 单 custodian + ratio 10000 是合法路由：全额路由给单一托管地址
+        assertTrue(minting.verifyRoute(_singleCustodianRoute()));
+
+        uint256 custodian1CollateralBefore = collateral.balanceOf(custodian1);
+        uint256 custodian2CollateralBefore = collateral.balanceOf(custodian2);
+        uint256 benefactorMBalanceBefore = m.balanceOf(benefactor);
+
+        vm.prank(minter);
+        minting.mint(order, _singleCustodianRoute(), sig);
+
+        assertEq(collateral.balanceOf(custodian1), custodian1CollateralBefore + 100 ether);
+        assertEq(collateral.balanceOf(custodian2), custodian2CollateralBefore);
+        assertEq(m.balanceOf(benefactor), benefactorMBalanceBefore + 100 ether);
+    }
+
+    function _singleCustodianRoute() internal view returns (IMonogramMinting.Route memory) {
         address[] memory addresses = new address[](1);
         addresses[0] = custodian1;
         uint256[] memory ratios = new uint256[](1);
         ratios[0] = 10_000;
-        IMonogramMinting.Route memory route = IMonogramMinting.Route({addresses: addresses, ratios: ratios});
-
-        vm.prank(minter);
-        minting.mint(order, route, sig);
+        return IMonogramMinting.Route({addresses: addresses, ratios: ratios});
     }
 
     function test_Mint_InvalidRoute_BadRatio() public {
