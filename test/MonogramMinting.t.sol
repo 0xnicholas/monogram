@@ -76,6 +76,13 @@ contract MockEIP1271Wallet {
     }
 }
 
+/// @notice 拒收原生 ETH 的合约：任何带 value 的调用都失败，用于触发 TransferFailed
+contract RejectsETH {
+    fallback() external payable {
+        revert("RejectsETH: no ETH accepted");
+    }
+}
+
 contract MonogramMintingTest is Test {
     M public m;
     WETH9 public weth;
@@ -281,6 +288,36 @@ contract MonogramMintingTest is Test {
             collateral_amount: collateralAmount,
             m_amount: mAmount
         });
+    }
+
+    function _createMintWETHOrder(uint256 nonce, uint256 collateralAmount, uint256 mAmount)
+        internal
+        view
+        returns (IMonogramMinting.Order memory)
+    {
+        return IMonogramMinting.Order({
+            order_id: "order-weth-1",
+            order_type: IMonogramMinting.OrderType.MINT,
+            expiry: block.timestamp + 1 hours,
+            nonce: nonce,
+            benefactor: benefactor,
+            beneficiary: beneficiary,
+            collateral_asset: address(weth),
+            collateral_amount: collateralAmount,
+            m_amount: mAmount
+        });
+    }
+
+    /// @notice 注册 WETH 为支持资产并给 benefactor 注入 WETH 余额与授权
+    function _setUpWETHAsset() internal {
+        vm.prank(admin);
+        minting.addSupportedAsset(address(weth), _defaultTokenConfig());
+
+        vm.deal(benefactor, 1_000 ether);
+        vm.prank(benefactor);
+        weth.deposit{value: 500 ether}();
+        vm.prank(benefactor);
+        weth.approve(address(minting), type(uint256).max);
     }
 
     // ----------- Deployment Tests -----------
@@ -701,6 +738,149 @@ contract MonogramMintingTest is Test {
         vm.prank(minter);
         vm.expectRevert(IMonogramMinting.GlobalMaxMintPerBlockExceeded.selector);
         minting.mint(order, route, sig);
+    }
+
+    // ----------- MintWETH Tests -----------
+
+    function test_MintWETH() public {
+        _setUpWETHAsset();
+
+        IMonogramMinting.Order memory order = _createMintWETHOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        uint256 benefactorWETHBefore = weth.balanceOf(benefactor);
+        uint256 custodian1ETHBefore = custodian1.balance;
+        uint256 custodian2ETHBefore = custodian2.balance;
+
+        vm.prank(minter);
+        minting.mintWETH(order, route, sig);
+
+        // benefactor 失去 WETH，beneficiary 收到 M
+        assertEq(weth.balanceOf(benefactor), benefactorWETHBefore - 100 ether);
+        assertEq(m.balanceOf(beneficiary), 100 ether);
+        // custodian 收到原生 ETH（50/50），Minting 合约不残留 ETH
+        assertEq(custodian1.balance, custodian1ETHBefore + 50 ether);
+        assertEq(custodian2.balance, custodian2ETHBefore + 50 ether);
+        assertEq(address(minting).balance, 0);
+        // per-block 记账：单资产 + 全局
+        (uint256 mintedPerAsset,) = minting.totalPerBlockPerAsset(block.number, address(weth));
+        assertEq(mintedPerAsset, 100 ether);
+        (uint256 mintedPerBlock,) = minting.totalPerBlock(block.number);
+        assertEq(mintedPerBlock, 100 ether);
+    }
+
+    function test_MintWETH_UnsupportedAsset() public {
+        _setUpWETHAsset();
+
+        // collateral 已注册但不是 WETH：路径校验失败
+        IMonogramMinting.Order memory order = _createMintOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.UnsupportedAsset.selector);
+        minting.mintWETH(order, route, sig);
+    }
+
+    function test_MintWETH_UnregisteredWETH() public {
+        // WETH 未注册为支持资产：限额修饰符先行 revert UnsupportedAsset
+        IMonogramMinting.Order memory order = _createMintWETHOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.UnsupportedAsset.selector);
+        minting.mintWETH(order, route, sig);
+    }
+
+    function test_MintWETH_PerBlockLimitAccounting() public {
+        _setUpWETHAsset();
+
+        // 调低 WETH 单资产限额
+        vm.prank(admin);
+        minting.setMaxMintPerBlock(10 ether, address(weth));
+
+        IMonogramMinting.Order memory order1 = _createMintWETHOrder(1, 6 ether, 6 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig1 = _signOrder(order1, benefactorPrivateKey);
+
+        vm.prank(minter);
+        minting.mintWETH(order1, route, sig1);
+
+        // 第一笔入账 6 ether，第二笔 6 ether 累计 12 > 10 触发限额
+        (uint256 mintedPerAsset,) = minting.totalPerBlockPerAsset(block.number, address(weth));
+        assertEq(mintedPerAsset, 6 ether);
+
+        IMonogramMinting.Order memory order2 = _createMintWETHOrder(2, 6 ether, 6 ether);
+        IMonogramMinting.Signature memory sig2 = _signOrder(order2, benefactorPrivateKey);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.MaxMintPerBlockExceeded.selector);
+        minting.mintWETH(order2, route, sig2);
+    }
+
+    function test_MintWETH_RouteProportionalDistribution() public {
+        _setUpWETHAsset();
+
+        // 30/70 分发
+        IMonogramMinting.Order memory order = _createMintWETHOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        route.ratios[0] = 3000;
+        route.ratios[1] = 7000;
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        uint256 custodian1ETHBefore = custodian1.balance;
+        uint256 custodian2ETHBefore = custodian2.balance;
+
+        vm.prank(minter);
+        minting.mintWETH(order, route, sig);
+
+        assertEq(custodian1.balance, custodian1ETHBefore + 30 ether);
+        assertEq(custodian2.balance, custodian2ETHBefore + 70 ether);
+    }
+
+    function test_MintWETH_RouteRemainderToLastCustodian() public {
+        _setUpWETHAsset();
+
+        // 3 wei 按比例 50/50 各得 1 wei，余 1 wei 归最后一个 custodian
+        IMonogramMinting.Order memory order = _createMintWETHOrder(1, 3, 3);
+        IMonogramMinting.Route memory route = _createRoute();
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        uint256 custodian1ETHBefore = custodian1.balance;
+        uint256 custodian2ETHBefore = custodian2.balance;
+
+        vm.prank(minter);
+        minting.mintWETH(order, route, sig);
+
+        assertEq(custodian1.balance, custodian1ETHBefore + 1);
+        assertEq(custodian2.balance, custodian2ETHBefore + 2);
+        assertEq(address(minting).balance, 0);
+    }
+
+    function test_MintWETH_TransferFailed() public {
+        _setUpWETHAsset();
+
+        // 注册拒收 ETH 的 custodian 并路由给它
+        RejectsETH rejector = new RejectsETH();
+        vm.prank(admin);
+        minting.addCustodianAddress(address(rejector));
+
+        IMonogramMinting.Order memory order = _createMintWETHOrder(1, 100 ether, 100 ether);
+        IMonogramMinting.Route memory route = _createRoute();
+        route.addresses[0] = address(rejector);
+        IMonogramMinting.Signature memory sig = _signOrder(order, benefactorPrivateKey);
+
+        uint256 benefactorWETHBefore = weth.balanceOf(benefactor);
+
+        vm.prank(minter);
+        vm.expectRevert(IMonogramMinting.TransferFailed.selector);
+        minting.mintWETH(order, route, sig);
+
+        // revert 后状态完全回滚
+        assertEq(weth.balanceOf(benefactor), benefactorWETHBefore);
+        assertEq(m.balanceOf(beneficiary), 0);
     }
 
     function test_Redeem_MaxRedeemPerBlockExceeded() public {
