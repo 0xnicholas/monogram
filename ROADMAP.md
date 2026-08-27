@@ -75,8 +75,8 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 ### 不包含的范围
 - ❌ StakedM（Phase 2）
 - ❌ 链下对冲系统（Phase 3）
-- ❌ 原生 ETH 处理（仅 ERC20）
-- ❌ Route 比例路由（直接转到单 custodian）
+
+注：Phase 0 曾计划不做 Route 比例路由与原生 ETH 处理，后经 #5/#8 决议复刻 EthenaMinting V2 而纳入范围（见 ADR-0003「设计演进」）。
 
 ---
 
