@@ -18,6 +18,8 @@ contract DeployM is Script {
         uint256 maxMintPerBlock;
         uint256 maxRedeemPerBlock;
         bool deployWeth; // true for local/anvil, false for live networks
+        bool enableWhitelist; // 主网部署后启用白名单（单向棘轮，#11 决议）；测试网保持 false
+        address mintingAdmin; // 可选：部署后请求移交 DEFAULT_ADMIN 的目标多签地址
     }
 
     function run() external {
@@ -31,7 +33,9 @@ contract DeployM is Script {
             custodians: _parseAddresses(vm.envOr("CUSTODIANS", string(""))),
             maxMintPerBlock: vm.envOr("MAX_MINT_PER_BLOCK", uint256(1_000_000 ether)),
             maxRedeemPerBlock: vm.envOr("MAX_REDEEM_PER_BLOCK", uint256(1_000_000 ether)),
-            deployWeth: vm.envOr("DEPLOY_WETH", true)
+            deployWeth: vm.envOr("DEPLOY_WETH", true),
+            enableWhitelist: vm.envOr("ENABLE_WHITELIST", false),
+            mintingAdmin: vm.envOr("MINTING_ADMIN", address(0))
         });
 
         vm.startBroadcast(deployerPrivateKey);
@@ -89,6 +93,21 @@ contract DeployM is Script {
         m.setMinter(address(minting));
         console.log("M minter set to:", address(minting));
 
+        // 6. Enable whitelist (mainnet sequence, one-way ratchet per issue #11)
+        //    测试网/本地不要设置 ENABLE_WHITELIST，保持 false 以便自由测试
+        if (cfg.enableWhitelist) {
+            minting.setWhitelistEnabled(true);
+            console.log("Whitelist ENABLED (irreversible)");
+        }
+
+        // 7. Optional: request two-step admin transfer to multisig
+        //    多签需随后调用 acceptAdmin() 完成接管
+        if (cfg.mintingAdmin != address(0)) {
+            minting.transferAdmin(cfg.mintingAdmin);
+            console.log("Admin transfer requested to:", cfg.mintingAdmin);
+            console.log("NOTE: multisig must call acceptAdmin() to complete");
+        }
+
         vm.stopBroadcast();
 
         // Print summary
@@ -97,7 +116,8 @@ contract DeployM is Script {
         console.log("M:", address(m));
         console.log("PriceFeed:", address(priceFeed));
         console.log("MonogramMinting:", address(minting));
-        console.log("Admin:", cfg.admin);
+        console.log("Admin:", cfg.mintingAdmin != address(0) ? cfg.mintingAdmin : cfg.admin);
+        console.log("Whitelist enabled:", minting.whitelistEnabled());
     }
 
     function _parseAddresses(string memory csv) internal pure returns (address[] memory) {

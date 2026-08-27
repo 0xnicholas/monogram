@@ -144,6 +144,8 @@ interface IMonogramMinting {
     error NoAssetsProvided();
     error BenefactorNotWhitelisted();
     error BeneficiaryNotApproved();
+    error WhitelistAlreadyEnabled();
+    error WhitelistDisableNotSupported();
     error InvalidEIP712Signature();
     error InvalidEIP1271Signature();
     error UnknownSignatureType();

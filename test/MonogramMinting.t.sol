@@ -7,6 +7,7 @@ import "../src/MonogramMinting.sol";
 import "../src/WETH9.sol";
 import "../src/interfaces/IMonogramPriceFeed.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/access/IAccessControl.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 
 contract MockERC20 is ERC20 {
@@ -972,6 +973,40 @@ contract MonogramMintingTest is Test {
         vm.prank(minter);
         vm.expectRevert(IMonogramMinting.BenefactorNotWhitelisted.selector);
         minting.mint(order, route, sig);
+    }
+
+    function test_Whitelist_Enable_AlreadyEnabled() public {
+        vm.prank(admin);
+        minting.setWhitelistEnabled(true);
+
+        vm.prank(admin);
+        vm.expectRevert(IMonogramMinting.WhitelistAlreadyEnabled.selector);
+        minting.setWhitelistEnabled(true);
+    }
+
+    function test_Whitelist_Disable_Reverts() public {
+        // 部署态即为 false，传 false 无场景且被拒绝
+        vm.prank(admin);
+        vm.expectRevert(IMonogramMinting.WhitelistDisableNotSupported.selector);
+        minting.setWhitelistEnabled(false);
+
+        // 启用后同样无法关闭（单向棘轮，#11 决议）
+        vm.prank(admin);
+        minting.setWhitelistEnabled(true);
+
+        vm.prank(admin);
+        vm.expectRevert(IMonogramMinting.WhitelistDisableNotSupported.selector);
+        minting.setWhitelistEnabled(false);
+
+        assertTrue(minting.whitelistEnabled());
+    }
+
+    function test_Whitelist_Enable_OnlyAdmin() public {
+        vm.prank(minter);
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, minter, bytes32(0))
+        );
+        minting.setWhitelistEnabled(true);
     }
 
     function test_SetApprovedBeneficiary_RemoveApproval() public {

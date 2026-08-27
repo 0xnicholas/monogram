@@ -169,7 +169,7 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 
 #### M3.4 — 主网部署（第 17-20 周）
 - [ ] 合约部署到 Ethereum 主网
-- [ ] M 持有者白名单（KYC/KYB）
+- [ ] mint/redeem 白名单启用（KYB 做市商）：部署后 `setWhitelistEnabled(true)`（单向棘轮，不可逆），再 `transferAdmin` 移交多签；M 代币转账不设限，散户走二级市场（#11 决议）
 - [ ] 有限上线：仅 whitelisted 做市商可 mint/redeem
 - [ ] 外部安全公司全面审计
 - [ ] 透明仪表盘上线
