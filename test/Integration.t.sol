@@ -101,7 +101,7 @@ contract IntegrationTest is Test {
 
         m.setMinter(address(minting));
 
-        stakedM = new StakedM(IERC20(address(m)), admin, "Staked Monogram", "sM");
+        stakedM = new StakedM(IERC20(address(m)), admin, admin, "Staked Monogram", "sM");
         distributor = new StakingRewardsDistributor(IStakedM(address(stakedM)), IM(address(m)), admin);
 
         // Grant roles
@@ -112,6 +112,9 @@ contract IntegrationTest is Test {
 
         stakedM.grantRole(REWARDER_ROLE, address(distributor));
         distributor.grantRole(OPERATOR_ROLE, operator);
+
+        // 集成流程用短冷却期
+        stakedM.setCooldownDuration(7 days);
 
         vm.stopPrank();
 
@@ -205,13 +208,22 @@ contract IntegrationTest is Test {
         uint256 assetsPerShare = stakedM.convertToAssets(1 ether);
         assertGt(assetsPerShare, 1 ether, "sM:M ratio should increase");
 
-        // 6. Unstake
+        // 6. Unstake（冷却路径：cooldownShares → 到期 unstake）
         uint256 sMBalance = stakedM.balanceOf(staker);
         vm.prank(staker);
-        uint256 assets = stakedM.redeem(sMBalance, staker, staker);
+        uint256 assetsQueued = stakedM.cooldownShares(sMBalance, staker);
+
+        vm.warp(block.timestamp + 8 days);
+
+        uint256 mBalanceBefore = m.balanceOf(staker);
+        vm.prank(staker);
+        stakedM.unstake(staker);
+
+        uint256 assets = m.balanceOf(staker) - mBalanceBefore;
 
         assertGt(assets, 100 ether, "should get back more than deposited");
         assertApproxEqAbs(assets, 110 ether, 1 ether);
+        assertApproxEqAbs(assetsQueued, 110 ether, 1 ether);
     }
 
     // ----------- Distributor Interval Enforcement -----------
