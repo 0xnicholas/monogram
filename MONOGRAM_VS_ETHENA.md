@@ -1,5 +1,13 @@
 # Monogram vs Ethena — 技术分析
 
+> [!WARNING]
+> **本文档已过时（写于 stub 阶段，2026-08）**。当前差距与复刻决策以以下为准：
+> - 刷新差距报告：[issue #2](https://github.com/0xnicholas/monogram/issues/2)
+> - 各模块决策：map [issue #1](https://github.com/0xnicholas/monogram/issues/1) 的 Decisions so far
+> - 落地后架构：`adr/`（ADR-0001 ~ 0012）
+>
+> 保留本文仅作历史参考（初始对比视角）。
+
 ## 概述
 
 Monogram 是一个对标 [Ethena](https://ethena.fi/) 的合成美元协议，代码库基于 Foundry（Solidity 0.8.28），当前处于**早期 stub 阶段**。本文从智能合约架构、代币经济、托管模型、风控机制四个维度进行对比分析。

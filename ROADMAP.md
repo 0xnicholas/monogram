@@ -13,7 +13,7 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 
 ---
 
-## Phase 0: 概念验证（当前阶段 — 已完成）
+## Phase 0: 概念验证（已完成）
 
 ### 目标
 确认架构设计，完成技术分析。
@@ -31,6 +31,10 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 
 ## Phase 1: 核心合约部署（1-2 个月）
 
+### 状态
+
+🔄 进行中：M1.1 / M1.2 已完成；M1.3 剩余测试网部署、签名服务原型、安全审计。
+
 ### 目标
 实现合成美元 M 的铸造与赎回核心逻辑，部署到以太坊测试网。
 
@@ -46,18 +50,18 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 
 #### M1.1 — 核心合约实现（第 1-2 周）
 - [x] ADR 设计完成
-- [ ] `M.sol` 实现与测试
-- [ ] `MonogramMinting.sol` 实现（含 EIP-712 签名、Nonce Bitmap、per-block 限额）
-- [ ] 角色管理（AccessControl）
+- [x] `M.sol` 实现与测试
+- [x] `MonogramMinting.sol` 实现（含 EIP-712 签名、Nonce Bitmap、per-block 限额；全量对齐 EthenaMinting V2，见 #5）
+- [x] 角色管理（SingleAdminAccessControl 基座，保留决议见 #17）
 
 #### M1.2 — 预言机集成（第 3 周）
-- [ ] 集成 Pyth 合约（`IPyth` / `PythUpgradable`）
-- [ ] 集成 Chainlink 合约（`AggregatorV3Interface`）
-- [ ] `MonogramPriceFeed` 实现
-- [ ] 价格偏差验证逻辑
+- [x] 集成 Pyth 合约（`IPyth` / `PythUpgradable`）
+- [x] 集成 Chainlink 合约（`AggregatorV3Interface`）
+- [x] `MonogramPriceFeed` 实现（双源取较旧 updatedAt + conf 校验）
+- [x] 价格偏差验证逻辑（分资产阈值，ADR-0008）
 
 #### M1.3 — 测试网部署（第 4 周）
-- [ ] Foundry 测试套件（单元 + 集成 + fork 测试）
+- [x] Foundry 测试套件（单元 + 集成 + fork 测试；174 用例全绿）
 - [ ] 部署到 Sepolia / Holesky 测试网
 - [ ] 链下签名服务原型（`cast` + `forge` 脚本验证）
 - [ ] 安全审计（合约层面）
@@ -82,6 +86,11 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 
 ## Phase 2: 质押与收益分发（2-3 个月）
 
+### 状态
+
+🟡 合约与测试已提前完成：M2.1 全量对齐 sUSDeV2（冷却期互斥 + UnstakingSilo，见 #7/#20），
+M2.2 分发器为简化版（闭环 mint 押后 Phase 3，#13）。剩余：外部安全审计（与 Phase 1 审计合并进行）。
+
 ### 目标
 实现 sM 质押代币和收益分发机制，启动测试网生态激励。
 
@@ -95,20 +104,20 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 ### 关键里程碑
 
 #### M2.1 — StakedM 实现（第 5-6 周）
-- [ ] ERC-4626 标准实现（`deposit` / `mint` / `withdraw` / `redeem`）
-- [ ] 8 小时 linear vesting 奖励机制
-- [ ] `transferInRewards()` — 仅 REWARDER 可调用
-- [ ] 解质押冷却期（可配置，最长 90 天）
-- [ ] 合规：SOFT_RESTRICTED / FULL_RESTRICTED 地址
+- [x] ERC-4626 标准实现（`deposit` / `mint` / `withdraw` / `redeem`）
+- [x] 8 小时 linear vesting 奖励机制（偏离：未 vest 完可合并再注入，ADR-0007）
+- [x] `transferInRewards()` — 仅 REWARDER 可调用
+- [x] 解质押冷却期（可配置，最长 90 天；互斥 + Silo 隔离，#20）
+- [x] 合规：SOFT_RESTRICTED / FULL_RESTRICTED 地址（语义对齐 V2）
 
 #### M2.2 — 奖励分发（第 7 周）
-- [ ] `StakingRewardsDistributor` 实现
-- [ ] 每周多次自动分发（防 lumpy arbitrage）
-- [ ] sM:M 汇率单调递增验证
+- [x] `StakingRewardsDistributor` 实现（简化版：operator 自备 M，1 天最小间隔）
+- [x] 每周多次自动分发（防 lumpy arbitrage）
+- [x] sM:M 汇率单调递增验证
 
 #### M2.3 — 集成测试（第 8 周）
-- [ ] 端到端测试：Mint → Stake → 奖励累积 → Unstake
-- [ ] 模拟奖励分发场景
+- [x] 端到端测试：Mint → Stake → 奖励累积 → Unstake（含冷却路径）
+- [x] 模拟奖励分发场景
 - [ ] 安全审计
 
 ### 验证标准

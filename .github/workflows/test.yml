@@ -16,7 +16,7 @@ jobs:
     name: Foundry project
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           submodules: recursive
 
@@ -26,6 +26,16 @@ jobs:
       - name: Show Forge version
         run: |
           forge --version
+
+      - name: Install Node dependencies
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install npm packages
+        run: |
+          npm ci
 
       - name: Run Forge fmt
         run: |
