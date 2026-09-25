@@ -64,11 +64,14 @@ Phase 0     Phase 1         Phase 2          Phase 3            Phase 4
 - [x] Foundry 测试套件（单元 + 集成 + fork 测试；174 用例全绿）
 - [x] 部署脚本覆盖全合约（M / PriceFeed / Minting / StakedM / 分发器 + 角色授予与预言机配置）
 - [x] 链下签名服务原型脚本（`script/E2EMint.s.sol`：EIP-712 签单 + 提交 mint 闭环；链上闭环验证并入 #22 冒烟）
-- [ ] 部署运行手册 + 部署后校验脚本（#21）
+- [x] 部署运行手册 + 部署后校验脚本（#21：`docs/deploy-runbook.md` + `script/PostDeployCheck.s.sol` + `script/lib/PostDeployChecker.sol`，25 个用例覆盖校验器自身）
 - [ ] 部署到 Sepolia 测试网并冒烟 mint/redeem（#22，前置 #21）
 - [ ] 工具层硬化：EIP-712 conformance 测试 + 共享签名库 + 角色常量（#23）
 - [ ] 审计前置：CI 接入覆盖率与静态分析 + 审计范围冻结（#24）
 - [ ] 安全审计（合约层面）（#25，前置 #24）
+
+注：`DeployM` 目前只移交 `MonogramMinting` 的 admin，其余四个合约的 admin/owner 按
+runbook §5 手动移交；是否自动化待 #26 决定。
 
 ### 验证标准
 ```

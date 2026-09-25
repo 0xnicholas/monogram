@@ -99,6 +99,15 @@ forge script script/DeployM.s.sol --rpc-url sepolia --broadcast --verify
 真实部署地址手工记录到 `deployments/<chainId>.json`（格式与三条硬性校验见 [deployments/README.md](./deployments/README.md)）；
 `broadcast/` 是本地回放日志，已从版本控制忽略，不作为地址来源。
 
+部署后**必跑**校验脚本（用同一份 `.env` 回头核对链上现实）：
+
+```bash
+forge script script/PostDeployCheck.s.sol --rpc-url sepolia
+```
+
+完整流程（环境准备 → 彩排 → 部署 → 校验 → admin 移交 → 冒烟 → 记录 / 失败处置）见
+[docs/deploy-runbook.md](./docs/deploy-runbook.md)。
+
 ## 路线图
 
 | 阶段 | 周期 | 内容 |

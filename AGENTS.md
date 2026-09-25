@@ -22,6 +22,10 @@ forge snapshot       # Gas 快照
 forge fmt            # 格式化
 slither .            # 静态分析
 
+# 部署与部署后校验（完整流程见 docs/deploy-runbook.md）
+forge script script/DeployM.s.sol --rpc-url localhost --broadcast
+forge script script/PostDeployCheck.s.sol --rpc-url localhost
+
 # 部署
 forge script script/DeployM.s.sol --rpc-url sepolia --broadcast
 ```

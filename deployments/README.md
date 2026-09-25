@@ -51,3 +51,8 @@
   `--chain-id 11155111` 跑的，链上不存在对应交易（部署者账户在真 Sepolia 上 nonce = 0），
   其 `broadcast/` 产物已删除，不作为记录保留。
 - 首次真实部署后按上述格式补 `deployments/sepolia.json`。本地彩排请使用 `--chain-id 31337`。
+
+## 收录步骤
+
+见 [docs/deploy-runbook.md](../docs/deploy-runbook.md)：部署 → 跑 `script/PostDeployCheck.s.sol`
+（把 `verification.result` 一并记入）→ 过三条硬性校验 → 落库 → 冒烟 mint/redeem。
