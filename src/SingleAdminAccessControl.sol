@@ -37,8 +37,16 @@ abstract contract SingleAdminAccessControl is IERC5313, ISingleAdminAccessContro
         super.renounceRole(role, account);
     }
 
-    function owner() public view virtual returns (address) {
+    function owner() public view virtual override(IERC5313, ISingleAdminAccessControl) returns (address) {
         return _currentDefaultAdmin;
+    }
+
+    /// @notice 待接受的 admin（无待接受移交时为零地址）
+    /// @dev 偏离参考实现（Ethena 的 `_pendingDefaultAdmin` 是私有且无 getter）：纯增量只读接口。
+    ///      7/10 多签 + 时间锁的移交流程需要链上可核验“已请求、待 acceptAdmin”这一中间态，
+    ///      否则部署后只能等到多签调用失败才知道 transferAdmin 没生效。见 ADR-0004「合约选择（#17 决议）」。
+    function pendingAdmin() public view virtual returns (address) {
+        return _pendingDefaultAdmin;
     }
 
     function _grantRole(bytes32 role, address account) internal override returns (bool) {

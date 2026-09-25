@@ -9,6 +9,7 @@ import "../src/StakedM.sol";
 import "../src/StakingRewardsDistributor.sol";
 import "../src/WETH9.sol";
 import "../src/interfaces/IMonogramPriceFeed.sol";
+import "./lib/EnvParsing.sol";
 
 contract DeployM is Script {
     // MonogramMinting 角色常量为 private（Ethena 风格），此处本地重建
@@ -42,8 +43,8 @@ contract DeployM is Script {
             admin: vm.addr(deployerPrivateKey),
             weth: vm.envOr("WETH_ADDRESS", address(0)),
             pyth: vm.envOr("PYTH_ADDRESS", address(0)), // 用 Pyth 升级版合约地址，见 ADR-0008「Pyth Core 升级」
-            assets: _parseAddresses(vm.envOr("ASSETS", string(""))),
-            custodians: _parseAddresses(vm.envOr("CUSTODIANS", string(""))),
+            assets: EnvParsing.parseAddresses(vm.envOr("ASSETS", string(""))),
+            custodians: EnvParsing.parseAddresses(vm.envOr("CUSTODIANS", string(""))),
             maxMintPerBlock: vm.envOr("MAX_MINT_PER_BLOCK", uint256(1_000_000 ether)),
             maxRedeemPerBlock: vm.envOr("MAX_REDEEM_PER_BLOCK", uint256(1_000_000 ether)),
             deployWeth: vm.envOr("DEPLOY_WETH", true),
@@ -136,6 +137,11 @@ contract DeployM is Script {
         StakingRewardsDistributor distributor =
             new StakingRewardsDistributor(IStakedM(address(stakedM)), IM(address(m)), cfg.admin);
         stakedM.grantRole(stakedM.REWARDER_ROLE(), address(distributor));
+        // 撤销构造函数授予 admin 的 REWARDER 占位授权（grantRole 只需 DEFAULT_ADMIN，随时可恢复）
+        if (cfg.admin != address(distributor)) {
+            stakedM.revokeRole(stakedM.REWARDER_ROLE(), cfg.admin);
+            console.log("Revoked placeholder REWARDER from:", cfg.admin);
+        }
         console.log("StakingRewardsDistributor deployed at:", address(distributor));
 
         // 10. Grant operating roles（默认全部授予部署者，测试网便利；生产用 OPERATORS/GATEKEEPERS 指定独立密钥）
@@ -177,14 +183,13 @@ contract DeployM is Script {
             console.log("NOTE: CHAINLINK_FEEDS not set, oracle configs left to operator");
             return;
         }
-        address[] memory clFeeds = _parseAddresses(clCsv);
-        string[] memory pythIds = _parseHex32List(vm.envOr("PYTH_FEED_IDS", string("")));
-        uint128 maxAge = uint128(vm.envOr("ORACLE_MAX_AGE", uint256(24 hours)));
-        uint128 maxDeviation = uint128(vm.envOr("ORACLE_MAX_DEVIATION_BPS", uint256(500)));
+        address[] memory clFeeds = EnvParsing.parseAddresses(clCsv);
+        bytes32[] memory pythIds = _pythFeedIds();
         require(assets.length == clFeeds.length, "CHAINLINK_FEEDS length mismatch");
         require(pythIds.length == 0 || pythIds.length == assets.length, "PYTH_FEED_IDS length mismatch");
+        (uint128 maxAge, uint128 maxDeviation) = _oracleBounds();
         for (uint256 i = 0; i < assets.length; i++) {
-            bytes32 pythId = pythIds.length == 0 ? bytes32(0) : vm.parseBytes32(pythIds[i]);
+            bytes32 pythId = pythIds.length == 0 ? bytes32(0) : pythIds[i];
             priceFeed.setOracleConfig(assets[i], pythId, clFeeds[i], maxAge, maxDeviation);
             console.log("Oracle configured for asset:", assets[i]);
         }
@@ -205,74 +210,22 @@ contract DeployM is Script {
             out[0] = fallbackSingle;
             return out;
         }
-        return _parseAddresses(csv);
+        return EnvParsing.parseAddresses(csv);
     }
 
-    function _parseHex32List(string memory csv) internal pure returns (string[] memory) {
-        if (bytes(csv).length == 0) return new string[](0);
-        bytes memory data = bytes(csv);
-        uint256 count = 1;
-        for (uint256 i = 0; i < data.length; i++) {
-            if (data[i] == ",") count++;
-        }
-        string[] memory items = new string[](count);
-        uint256 idx = 0;
-        uint256 last = 0;
-        for (uint256 i = 0; i <= data.length; i++) {
-            if (i == data.length || data[i] == ",") {
-                bytes memory chunk = new bytes(i - last);
-                for (uint256 j = 0; j < i - last; j++) {
-                    chunk[j] = data[last + j];
-                }
-                items[idx] = string(chunk);
-                idx++;
-                last = i + 1;
-            }
-        }
-        return items;
+    /// @notice Pyth feed id 列表（CSV），供 _configureOracles 使用
+    function _pythFeedIds() internal view returns (bytes32[] memory) {
+        return EnvParsing.parseHex32List(vm.envOr("PYTH_FEED_IDS", string("")));
     }
 
-    function _parseAddresses(string memory csv) internal pure returns (address[] memory) {
-        if (bytes(csv).length == 0) return new address[](0);
-        bytes memory data = bytes(csv);
-        uint256 count = 1;
-        for (uint256 i = 0; i < data.length; i++) {
-            if (data[i] == ",") count++;
-        }
-        address[] memory addrs = new address[](count);
-        uint256 idx = 0;
-        uint256 last = 0;
-        for (uint256 i = 0; i <= data.length; i++) {
-            if (i == data.length || data[i] == ",") {
-                bytes memory chunk = new bytes(i - last);
-                for (uint256 j = 0; j < i - last; j++) {
-                    chunk[j] = data[last + j];
-                }
-                addrs[idx] = _parseAddress(string(chunk));
-                idx++;
-                last = i + 1;
-            }
-        }
-        return addrs;
+    /// @notice 预言机价格最大年龄与最大偏差（uint128，显式拒绝溢出而不是静默截断）
+    function _oracleBounds() internal view returns (uint128 maxAge, uint128 maxDeviation) {
+        maxAge = _u128(vm.envOr("ORACLE_MAX_AGE", uint256(24 hours)), "ORACLE_MAX_AGE");
+        maxDeviation = _u128(vm.envOr("ORACLE_MAX_DEVIATION_BPS", uint256(500)), "ORACLE_MAX_DEVIATION_BPS");
     }
 
-    function _parseAddress(string memory s) internal pure returns (address) {
-        bytes memory b = bytes(s);
-        require(b.length == 42, "invalid address length");
-        uint256 addr = 0;
-        for (uint256 i = 2; i < b.length; i++) {
-            uint8 digit;
-            if (b[i] >= 0x30 && b[i] <= 0x39) {
-                digit = uint8(b[i]) - 0x30;
-            } else if (b[i] >= 0x41 && b[i] <= 0x46) {
-                digit = uint8(b[i]) - 0x41 + 10;
-            } else if (b[i] >= 0x61 && b[i] <= 0x66) {
-                digit = uint8(b[i]) - 0x61 + 10;
-            } else {
-                revert("invalid address char");
-            }
-            addr = addr * 16 + digit;
-        }
-        return address(uint160(addr));
+    function _u128(uint256 value, string memory name) internal pure returns (uint128) {
+        require(value <= type(uint128).max, string.concat(name, " exceeds uint128"));
+        return uint128(value);
     }
 }
