@@ -17,7 +17,7 @@
 forge build          # 编译
 forge test           # 运行测试
 forge test -vvv      # 详细日志
-forge coverage       # 测试覆盖率
+forge coverage --ir-minimum   # 测试覆盖率（via_ir = true 下必须加 --ir-minimum）
 forge snapshot       # Gas 快照
 forge fmt            # 格式化
 slither .            # 静态分析

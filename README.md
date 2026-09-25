@@ -73,12 +73,31 @@ git submodule update --init --recursive
 # 编译
 forge build
 
-# 测试
+# 测试（fork 用例会走真实 RPC，可用 MAINNET_RPC_URL 覆盖）
 forge test
+forge test --no-match-path 'test/MonogramFork.t.sol'   # 纯本地，CI 友好
 
-# 部署（测试网）
-forge script script/DeployM.s.sol --rpc-url sepolia --broadcast
+# 覆盖率（via_ir = true 下必须加 --ir-minimum）
+forge coverage --ir-minimum --report summary
 ```
+
+### 本地彩排（不写链上记录）
+
+```bash
+anvil --chain-id 31337            # 不要用 11155111 冒充 Sepolia：广播日志会看起来像真部署
+cp .env.example .env              # 见 .env.example 的变量说明（CSV 列表不要带空格）
+forge script script/DeployM.s.sol --rpc-url http://localhost:8545 --broadcast
+forge script script/E2EMint.s.sol --rpc-url http://localhost:8545 --broadcast   # EIP-712 链下签名 + mint 冒烟
+```
+
+### 部署（测试网 / 主网）
+
+```bash
+forge script script/DeployM.s.sol --rpc-url sepolia --broadcast --verify
+```
+
+真实部署地址手工记录到 `deployments/<chainId>.json`（格式与三条硬性校验见 [deployments/README.md](./deployments/README.md)）；
+`broadcast/` 是本地回放日志，已从版本控制忽略，不作为地址来源。
 
 ## 路线图
 

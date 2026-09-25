@@ -5,10 +5,10 @@ out/
 # Node
 node_modules/
 
-# Ignores development broadcast logs
-!/broadcast
-/broadcast/*/31337/
-/broadcast/**/dry-run/
+# 本地广播日志一律不入库：它只记录某一次本地/临时链的执行回放，
+# 极易被误当真实部署证据（曾出现 anvil --chain-id 11155111 的彩排日志
+# 看起来像 Sepolia 部署）。真实部署地址手工记录在 deployments/<chainId>.json。
+/broadcast/
 
 # Dotenv file
 .env
