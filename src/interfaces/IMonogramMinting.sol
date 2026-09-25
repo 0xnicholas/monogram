@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0
 pragma solidity ^0.8.36;
 
+import "./IM.sol";
+import "./IMonogramPriceFeed.sol";
+
 interface IMonogramMinting {
     /* --------------- EVENTS --------------- */
 
@@ -168,6 +171,9 @@ interface IMonogramMinting {
     function verifyRoute(Route calldata route) external view returns (bool);
 
     function verifyNonce(address sender, uint256 nonce) external view returns (uint256, uint256, uint256);
+
+    function m() external view returns (IM);
+    function priceFeed() external view returns (IMonogramPriceFeed);
 
     function mint(Order calldata order, Route calldata route, Signature calldata signature) external;
 

@@ -5,10 +5,20 @@ import "forge-std/Script.sol";
 import "../src/M.sol";
 import "../src/MonogramMinting.sol";
 import "../src/MonogramPriceFeed.sol";
+import "../src/StakedM.sol";
+import "../src/StakingRewardsDistributor.sol";
 import "../src/WETH9.sol";
 import "../src/interfaces/IMonogramPriceFeed.sol";
 
 contract DeployM is Script {
+    // MonogramMinting 角色常量为 private（Ethena 风格），此处本地重建
+    bytes32 internal constant MINTER_ROLE = keccak256("MINTER_ROLE");
+    bytes32 internal constant REDEEMER_ROLE = keccak256("REDEEMER_ROLE");
+    bytes32 internal constant GATEKEEPER_ROLE = keccak256("GATEKEEPER_ROLE");
+
+    /// @notice STAKEDM_COOLDOWN_SECONDS 未设置时的哨兵值：表示沿用构造函数默认冷却期（90 天）
+    uint256 internal constant SKIP_COOLDOWN_SENTINEL = type(uint24).max;
+
     struct DeployConfig {
         address admin;
         address weth;
@@ -20,6 +30,9 @@ contract DeployM is Script {
         bool deployWeth; // true for local/anvil, false for live networks
         bool enableWhitelist; // 主网部署后启用白名单（单向棘轮，#11 决议）；测试网保持 false
         address mintingAdmin; // 可选：部署后请求移交 DEFAULT_ADMIN 的目标多签地址
+        string stakedMName;
+        string stakedMSymbol;
+        uint24 stakedMCooldown;
     }
 
     function run() external {
@@ -35,7 +48,10 @@ contract DeployM is Script {
             maxRedeemPerBlock: vm.envOr("MAX_REDEEM_PER_BLOCK", uint256(1_000_000 ether)),
             deployWeth: vm.envOr("DEPLOY_WETH", true),
             enableWhitelist: vm.envOr("ENABLE_WHITELIST", false),
-            mintingAdmin: vm.envOr("MINTING_ADMIN", address(0))
+            mintingAdmin: vm.envOr("MINTING_ADMIN", address(0)),
+            stakedMName: vm.envOr("STAKEDM_NAME", string("Staked Monogram")),
+            stakedMSymbol: vm.envOr("STAKEDM_SYMBOL", string("sM")),
+            stakedMCooldown: uint24(_cooldownFromEnv()) // 未设置 = 保持构造值 90 天；填 0 = 关闭冷却期
         });
 
         vm.startBroadcast(deployerPrivateKey);
@@ -108,6 +124,37 @@ contract DeployM is Script {
             console.log("NOTE: multisig must call acceptAdmin() to complete");
         }
 
+        // 8. Deploy StakedM（初始 REWARDER=admin 占位，随后授予分发器）
+        StakedM stakedM = new StakedM(IERC20(address(m)), cfg.admin, cfg.admin, cfg.stakedMName, cfg.stakedMSymbol);
+        console.log("StakedM deployed at:", address(stakedM));
+        if (cfg.stakedMCooldown != SKIP_COOLDOWN_SENTINEL) {
+            stakedM.setCooldownDuration(cfg.stakedMCooldown);
+            console.log("StakedM cooldown set to (s):", uint256(cfg.stakedMCooldown));
+        }
+
+        // 9. Deploy StakingRewardsDistributor 并接管 REWARDER
+        StakingRewardsDistributor distributor =
+            new StakingRewardsDistributor(IStakedM(address(stakedM)), IM(address(m)), cfg.admin);
+        stakedM.grantRole(stakedM.REWARDER_ROLE(), address(distributor));
+        console.log("StakingRewardsDistributor deployed at:", address(distributor));
+
+        // 10. Grant operating roles（默认全部授予部署者，测试网便利；生产用 OPERATORS/GATEKEEPERS 指定独立密钥）
+        address[] memory operators = _envAddressList("OPERATORS", cfg.admin);
+        for (uint256 i = 0; i < operators.length; i++) {
+            minting.grantRole(MINTER_ROLE, operators[i]);
+            minting.grantRole(REDEEMER_ROLE, operators[i]);
+            distributor.grantRole(distributor.OPERATOR_ROLE(), operators[i]);
+            console.log("Granted MINTER/REDEEMER/OPERATOR to:", operators[i]);
+        }
+        address[] memory gatekeepers = _envAddressList("GATEKEEPERS", cfg.admin);
+        for (uint256 i = 0; i < gatekeepers.length; i++) {
+            minting.grantRole(GATEKEEPER_ROLE, gatekeepers[i]);
+            console.log("Granted GATEKEEPER to:", gatekeepers[i]);
+        }
+
+        // 11. Configure oracles per asset（CHAINLINK_FEEDS / PYTH_FEED_IDS 与 ASSETS 对齐；未提供则跳过）
+        _configureOracles(priceFeed, cfg.assets);
+
         vm.stopBroadcast();
 
         // Print summary
@@ -116,8 +163,73 @@ contract DeployM is Script {
         console.log("M:", address(m));
         console.log("PriceFeed:", address(priceFeed));
         console.log("MonogramMinting:", address(minting));
+        console.log("StakedM:", address(stakedM));
+        console.log("StakingRewardsDistributor:", address(distributor));
         console.log("Admin:", cfg.mintingAdmin != address(0) ? cfg.mintingAdmin : cfg.admin);
         console.log("Whitelist enabled:", minting.whitelistEnabled());
+    }
+
+    /// @notice per-asset 预言机配置：CHAINLINK_FEEDS / PYTH_FEED_IDS 与 ASSETS 逐位对齐（CSV）
+    /// @dev 默认参数（maxAge=24h、deviation=500bps）为测试网值，同 fork 测试；生产按 ADR-0008 治理
+    function _configureOracles(MonogramPriceFeed priceFeed, address[] memory assets) internal {
+        string memory clCsv = vm.envOr("CHAINLINK_FEEDS", string(""));
+        if (bytes(clCsv).length == 0) {
+            console.log("NOTE: CHAINLINK_FEEDS not set, oracle configs left to operator");
+            return;
+        }
+        address[] memory clFeeds = _parseAddresses(clCsv);
+        string[] memory pythIds = _parseHex32List(vm.envOr("PYTH_FEED_IDS", string("")));
+        uint128 maxAge = uint128(vm.envOr("ORACLE_MAX_AGE", uint256(24 hours)));
+        uint128 maxDeviation = uint128(vm.envOr("ORACLE_MAX_DEVIATION_BPS", uint256(500)));
+        require(assets.length == clFeeds.length, "CHAINLINK_FEEDS length mismatch");
+        require(pythIds.length == 0 || pythIds.length == assets.length, "PYTH_FEED_IDS length mismatch");
+        for (uint256 i = 0; i < assets.length; i++) {
+            bytes32 pythId = pythIds.length == 0 ? bytes32(0) : vm.parseBytes32(pythIds[i]);
+            priceFeed.setOracleConfig(assets[i], pythId, clFeeds[i], maxAge, maxDeviation);
+            console.log("Oracle configured for asset:", assets[i]);
+        }
+    }
+
+    /// @notice 读冷却期配置，显式拒绝超出 uint24 的值（否则静默截断可能把冷却期变成 0）
+    /// @dev 上限（90 天）由 StakedM.setCooldownDuration 校验
+    function _cooldownFromEnv() internal view returns (uint256) {
+        uint256 raw = vm.envOr("STAKEDM_COOLDOWN_SECONDS", SKIP_COOLDOWN_SENTINEL);
+        require(raw <= type(uint24).max, "STAKEDM_COOLDOWN_SECONDS exceeds uint24");
+        return raw;
+    }
+
+    function _envAddressList(string memory name, address fallbackSingle) internal returns (address[] memory out) {
+        string memory csv = vm.envOr(name, string(""));
+        if (bytes(csv).length == 0) {
+            out = new address[](1);
+            out[0] = fallbackSingle;
+            return out;
+        }
+        return _parseAddresses(csv);
+    }
+
+    function _parseHex32List(string memory csv) internal pure returns (string[] memory) {
+        if (bytes(csv).length == 0) return new string[](0);
+        bytes memory data = bytes(csv);
+        uint256 count = 1;
+        for (uint256 i = 0; i < data.length; i++) {
+            if (data[i] == ",") count++;
+        }
+        string[] memory items = new string[](count);
+        uint256 idx = 0;
+        uint256 last = 0;
+        for (uint256 i = 0; i <= data.length; i++) {
+            if (i == data.length || data[i] == ",") {
+                bytes memory chunk = new bytes(i - last);
+                for (uint256 j = 0; j < i - last; j++) {
+                    chunk[j] = data[last + j];
+                }
+                items[idx] = string(chunk);
+                idx++;
+                last = i + 1;
+            }
+        }
+        return items;
     }
 
     function _parseAddresses(string memory csv) internal pure returns (address[] memory) {
